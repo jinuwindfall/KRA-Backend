@@ -8,6 +8,7 @@ from .views import (
     KRABulkCreateAPI,
     MyAppraisalAPI,
     KRATemplateAPI,
+    DownloadAllStaffsPDFAPI,
 )
 
 urlpatterns = [
@@ -19,4 +20,6 @@ urlpatterns = [
     path('api/kras/bulk/', KRABulkCreateAPI.as_view(), name='api_kras_bulk'),
     path('api/kras/<int:pk>/', KRADetailAPI.as_view(), name='api_kra_detail'),
     path('api/kra-template/', KRATemplateAPI.as_view(), name='api_kra_template'),
+    path('api/download/all-staffs-pdf/', DownloadAllStaffsPDFAPI.as_view(), name='api_download_all_staffs_pdf'),
+    path('api/appraisals/download-all-staffs-pdf/', DownloadAllStaffsPDFAPI.as_view(), name='api_appraisals_download_all_staffs_pdf'),
 ]

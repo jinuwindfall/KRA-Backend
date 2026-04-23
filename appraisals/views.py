@@ -1,8 +1,11 @@
+import io
 from datetime import date
 
+from django.http import HttpResponse
 from rest_framework import generics, permissions, status
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from .serializers import (
     AppraisalSerializer,
     AppraiserAppraisalSerializer,
@@ -525,4 +528,75 @@ class KRATemplateAPI(generics.GenericAPIView):
 
         serializer = self.get_serializer(template)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class DownloadAllStaffsPDFAPI(APIView):
+    """HR-only endpoint to download a compact PDF summary for all staff appraisals."""
+    permission_classes = [IsAuthenticatedEmployee]
+
+    def get(self, request, *args, **kwargs):
+        if request.user.employee.role != Employee.ROLE_HR:
+            raise PermissionDenied('Only HR can download all staff PDF reports.')
+
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.pdfgen import canvas
+        except ImportError:
+            return Response(
+                {'error': 'PDF dependency is missing. Install reportlab in the backend environment.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        appraisals = Appraisal.objects.filter(employee__role=Employee.ROLE_STAFF).select_related(
+            'employee',
+            'employee__user',
+            'employee__department',
+        ).prefetch_related('kras').order_by(
+            'employee__department__name',
+            'employee__user__first_name',
+            'employee__user__last_name',
+        )
+
+        buffer = io.BytesIO()
+        pdf = canvas.Canvas(buffer, pagesize=A4)
+        width, height = A4
+
+        y = height - 40
+        pdf.setFont('Helvetica-Bold', 12)
+        pdf.drawString(40, y, 'All Staff Appraisal Summary')
+        y -= 18
+        pdf.setFont('Helvetica', 9)
+        pdf.drawString(40, y, f"Generated on: {date.today().isoformat()}")
+        y -= 18
+        pdf.drawString(40, y, 'Emp ID | Name | Department | Status | Marks (Appraisee/Appraiser/Reviewer)')
+        y -= 14
+
+        pdf.setFont('Helvetica', 8)
+        for appraisal in appraisals:
+            kras = list(appraisal.kras.all())
+            appraisee_total = sum(float(k.appraisee_mark or 0) for k in kras)
+            appraiser_total = sum(float(k.appraiser_mark or 0) for k in kras)
+            reviewer_total = sum(float(k.reviewer_mark or 0) for k in kras)
+
+            line = (
+                f"{appraisal.employee.emp_id} | "
+                f"{(appraisal.employee.user.get_full_name() or appraisal.employee.user.username)[:22]} | "
+                f"{(appraisal.employee.department.name if appraisal.employee.department else 'Unassigned')[:14]} | "
+                f"{appraisal.status[:18]} | "
+                f"{appraisee_total:.1f}/{appraiser_total:.1f}/{reviewer_total:.1f}"
+            )
+            pdf.drawString(40, y, line)
+            y -= 12
+
+            if y <= 40:
+                pdf.showPage()
+                y = height - 40
+                pdf.setFont('Helvetica', 8)
+
+        pdf.save()
+        buffer.seek(0)
+
+        response = HttpResponse(buffer.getvalue(), content_type='application/pdf')
+        response['Content-Disposition'] = 'attachment; filename="all_staff_appraisals.pdf"'
+        return response
 
