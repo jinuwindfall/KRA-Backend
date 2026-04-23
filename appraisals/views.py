@@ -58,25 +58,70 @@ def clone_common_structure(appraisal):
 
 
 def ensure_current_year_appraisals(employee_qs):
+    employee_ids = list(employee_qs.values_list('id', flat=True))
+    if not employee_ids:
+        return
+
     today = date.today()
     period_from = date(today.year, 1, 1)
     period_to = date(today.year, 12, 31)
 
-    for emp in employee_qs:
-        existing = Appraisal.objects.filter(employee=emp).first()
-        if existing:
-            # If appraisal exists but has no KRAs yet, try to apply the structure now
-            if not existing.kras.exists():
-                clone_common_structure(existing)
-            continue
-        appraisal = Appraisal.objects.create(
-            employee=emp,
-            appraisal_type='Annual',
-            period_from=period_from,
-            period_to=period_to,
-            status=Appraisal.STATUS_DRAFT,
+    existing_emp_ids = set(
+        Appraisal.objects.filter(employee_id__in=employee_ids).values_list('employee_id', flat=True)
+    )
+    missing_emp_ids = [emp_id for emp_id in employee_ids if emp_id not in existing_emp_ids]
+
+    if missing_emp_ids:
+        Appraisal.objects.bulk_create([
+            Appraisal(
+                employee_id=emp_id,
+                appraisal_type='Annual',
+                period_from=period_from,
+                period_to=period_to,
+                status=Appraisal.STATUS_DRAFT,
+            )
+            for emp_id in missing_emp_ids
+        ])
+
+    appraisals = list(Appraisal.objects.filter(employee_id__in=employee_ids))
+    appraisal_ids = [app.id for app in appraisals]
+    if not appraisal_ids:
+        return
+
+    appraisal_ids_with_kras = set(
+        KRA.objects.filter(appraisal_id__in=appraisal_ids).values_list('appraisal_id', flat=True).distinct()
+    )
+    empty_appraisals = [app for app in appraisals if app.id not in appraisal_ids_with_kras]
+
+    if not empty_appraisals:
+        return
+
+    template = KRATemplate.objects.prefetch_related('rows').order_by('-id').first()
+    if not template:
+        return
+
+    rows = list(template.rows.all())
+    if not rows:
+        return
+
+    appraisals_to_update = [app for app in empty_appraisals if app.frame_config != template.frame_config]
+    if appraisals_to_update:
+        for app in appraisals_to_update:
+            app.frame_config = template.frame_config
+        Appraisal.objects.bulk_update(appraisals_to_update, ['frame_config'])
+
+    KRA.objects.bulk_create([
+        KRA(
+            appraisal_id=app.id,
+            section=row.section,
+            sl_no=row.sl_no,
+            title='',
+            description='',
+            max_mark=row.max_mark,
         )
-        clone_common_structure(appraisal)
+        for app in empty_appraisals
+        for row in rows
+    ])
 
 
 class IsAuthenticatedEmployee(permissions.BasePermission):
@@ -134,7 +179,17 @@ class AppraisalListCreateAPI(generics.ListCreateAPIView):
 
         ensure_current_year_appraisals(visible_employees)
 
-        qs = Appraisal.objects.select_related('employee', 'employee__user', 'employee__department').prefetch_related('kras').order_by('employee__department__name', 'employee__user__first_name', 'employee__user__last_name')
+        qs = Appraisal.objects.select_related(
+            'employee',
+            'employee__user',
+            'employee__department',
+            'employee__appraiser__user',
+            'employee__reviewer__user',
+        ).prefetch_related('kras').order_by(
+            'employee__department__name',
+            'employee__user__first_name',
+            'employee__user__last_name',
+        )
         return self._filter_qs(qs)
 
     def get_serializer_class(self):
@@ -178,7 +233,13 @@ class AppraisalDetailAPI(generics.RetrieveUpdateAPIView):
         return qs.filter(employee=employee)
 
     def get_queryset(self):
-        qs = Appraisal.objects.select_related('employee', 'employee__user').prefetch_related('kras')
+        qs = Appraisal.objects.select_related(
+            'employee',
+            'employee__user',
+            'employee__department',
+            'employee__appraiser__user',
+            'employee__reviewer__user',
+        ).prefetch_related('kras')
         return self._filter_qs(qs)
 
     def get_serializer_class(self):
@@ -373,7 +434,13 @@ class MyAppraisalAPI(generics.ListAPIView):
     def get_queryset(self):
         employee = self.request.user.employee
         ensure_current_year_appraisals(Employee.objects.filter(pk=employee.pk))
-        return Appraisal.objects.select_related('employee', 'employee__user').prefetch_related('kras').filter(employee=employee)
+        return Appraisal.objects.select_related(
+            'employee',
+            'employee__user',
+            'employee__department',
+            'employee__appraiser__user',
+            'employee__reviewer__user',
+        ).prefetch_related('kras').filter(employee=employee)
 
 
 class KRATemplateAPI(generics.GenericAPIView):

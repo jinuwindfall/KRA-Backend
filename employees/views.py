@@ -49,7 +49,9 @@ class LoginView(APIView):
         if not user:
             return Response({'error': 'Invalid credentials.'}, status=status.HTTP_401_UNAUTHORIZED)
         try:
-            emp = user.employee
+            emp = Employee.objects.select_related(
+                'user', 'department', 'appraiser__user', 'reviewer__user'
+            ).prefetch_related('reviewer_departments').get(user=user)
         except Employee.DoesNotExist:
             return Response({'error': 'No employee profile linked to this account.'}, status=status.HTTP_400_BAD_REQUEST)
         token, _ = Token.objects.get_or_create(user=user)
@@ -121,7 +123,9 @@ class MeView(APIView):
 
     def get(self, request):
         try:
-            emp = request.user.employee
+            emp = Employee.objects.select_related(
+                'user', 'department', 'appraiser__user', 'reviewer__user'
+            ).prefetch_related('reviewer_departments').get(user=request.user)
         except Employee.DoesNotExist:
             return Response({'error': 'No employee profile.'}, status=status.HTTP_404_NOT_FOUND)
         return Response(_employee_payload(emp))
@@ -204,16 +208,26 @@ class EmployeeListCreateView(APIView):
             )
             if dept_ids:
                 employees = employees.filter(department_id__in=dept_ids)
-            employees = employees.select_related('user', 'department', 'appraiser__user', 'reviewer__user').order_by('department__name', 'user__first_name', 'user__last_name')
+            employees = employees.select_related(
+                'user', 'department', 'appraiser__user', 'reviewer__user'
+            ).prefetch_related(
+                'reviewer_departments', 'appraiser_departments'
+            ).order_by('department__name', 'user__first_name', 'user__last_name')
         elif emp.role == Employee.ROLE_REVIEWER:
             dept_ids = list(emp.reviewer_departments.values_list('id', flat=True))
             reviewer_qs = Employee.objects.filter(reviewer=emp)
             if dept_ids:
                 reviewer_qs = reviewer_qs.filter(department_id__in=dept_ids)
-            employees = reviewer_qs.select_related('user', 'department', 'appraiser__user', 'reviewer__user').order_by('department__name', 'user__first_name', 'user__last_name')
+            employees = reviewer_qs.select_related(
+                'user', 'department', 'appraiser__user', 'reviewer__user'
+            ).prefetch_related(
+                'reviewer_departments', 'appraiser_departments'
+            ).order_by('department__name', 'user__first_name', 'user__last_name')
         elif emp.role == Employee.ROLE_HR:
             employees = Employee.objects.all().select_related(
                 'user', 'department', 'appraiser__user', 'reviewer__user'
+            ).prefetch_related(
+                'reviewer_departments', 'appraiser_departments'
             ).order_by('department__name', 'user__first_name', 'user__last_name')
         else:
             return Response({'error': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
@@ -230,6 +244,9 @@ class EmployeeListCreateView(APIView):
         serializer = EmployeeCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         new_emp = serializer.save()
+        new_emp = Employee.objects.select_related(
+            'user', 'department', 'appraiser__user', 'reviewer__user'
+        ).prefetch_related('reviewer_departments', 'appraiser_departments').get(pk=new_emp.pk)
         return Response(EmployeeListSerializer(new_emp).data, status=status.HTTP_201_CREATED)
 
 
@@ -243,13 +260,17 @@ class EmployeeDetailView(APIView):
             return None, Response({'error': 'No employee profile.'}, status=status.HTTP_403_FORBIDDEN)
 
         if caller.role == Employee.ROLE_HR:
-            employee = Employee.objects.filter(pk=pk).select_related('user').first()
+            employee = Employee.objects.filter(pk=pk).select_related(
+                'user', 'department', 'appraiser__user', 'reviewer__user'
+            ).prefetch_related('reviewer_departments', 'appraiser_departments').first()
         elif caller.role == Employee.ROLE_REVIEWER:
             dept_ids = list(caller.reviewer_departments.values_list('id', flat=True))
             reviewer_qs = Employee.objects.filter(pk=pk, reviewer=caller)
             if dept_ids:
                 reviewer_qs = reviewer_qs.filter(department_id__in=dept_ids)
-            employee = reviewer_qs.select_related('user').first()
+            employee = reviewer_qs.select_related(
+                'user', 'department', 'appraiser__user', 'reviewer__user'
+            ).prefetch_related('reviewer_departments', 'appraiser_departments').first()
         else:
             employee = None
 
