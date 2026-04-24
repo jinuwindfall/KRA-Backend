@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Department, Employee
+from .models import Department, Employee, EmployeeMemo
 
 
 @admin.register(Department)
@@ -20,6 +20,13 @@ class EmployeeAdmin(admin.ModelAdmin):
             'fields': ('appraiser', 'reviewer')
         }),
     )
+
+
+@admin.register(EmployeeMemo)
+class EmployeeMemoAdmin(admin.ModelAdmin):
+    list_display = ('id', 'employee', 'created_by', 'created_at')
+    list_filter = ('created_at',)
+    search_fields = ('employee__emp_id', 'employee__user__first_name', 'employee__user__last_name', 'memo')
 
 
 # ── Proxy models for separate admin sections ──

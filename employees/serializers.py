@@ -4,7 +4,7 @@ import re
 from django.contrib.auth.models import User
 from rest_framework import serializers
 from appraisals.models import Appraisal
-from .models import Department, Employee
+from .models import Department, Employee, EmployeeMemo
 
 
 def _normalize_username_base(name, emp_id):
@@ -198,3 +198,44 @@ class EmployeeCreateSerializer(serializers.Serializer):
             instance.appraiser_departments.set(appraiser_depts)
 
         return instance
+
+
+class EmployeeMemoSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.SerializerMethodField()
+    employee_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EmployeeMemo
+        fields = [
+            'id',
+            'employee',
+            'employee_name',
+            'memo',
+            'created_by',
+            'created_by_name',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = [
+            'id',
+            'created_by',
+            'created_by_name',
+            'employee_name',
+            'created_at',
+            'updated_at',
+        ]
+
+    def get_created_by_name(self, obj):
+        if not obj.created_by:
+            return ''
+        return obj.created_by.user.get_full_name() or obj.created_by.user.username
+
+    def get_employee_name(self, obj):
+        return obj.employee.user.get_full_name() or obj.employee.user.username
+
+
+class EmployeeWithMemosSerializer(EmployeeListSerializer):
+    memos = EmployeeMemoSerializer(many=True, read_only=True)
+
+    class Meta(EmployeeListSerializer.Meta):
+        fields = EmployeeListSerializer.Meta.fields + ['memos']

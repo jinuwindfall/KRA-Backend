@@ -5,6 +5,7 @@ from datetime import date, datetime
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.db import transaction
+from django.db.models import Prefetch
 from django.utils.dateparse import parse_date
 from rest_framework import permissions, status
 from rest_framework.authtoken.models import Token
@@ -13,7 +14,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import Department, Employee
-from .serializers import DepartmentSerializer, EmployeeCreateSerializer, EmployeeListSerializer
+from .models import EmployeeMemo
+from .serializers import (
+    DepartmentSerializer,
+    EmployeeCreateSerializer,
+    EmployeeListSerializer,
+    EmployeeMemoSerializer,
+    EmployeeWithMemosSerializer,
+)
 
 
 def _employee_payload(emp):
@@ -644,5 +652,88 @@ class DepartmentManagersView(APIView):
             'reviewer_id': reviewer.id if reviewer else None,
             'reviewer_name': reviewer.user.get_full_name() if reviewer else '',
         })
+
+
+class EmployeeMemoListCreateView(APIView):
+    """HR-only endpoint to list/create memos for a staff member."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _get_target_employee(self, request, pk):
+        try:
+            caller = request.user.employee
+        except Employee.DoesNotExist:
+            return None, Response({'error': 'No employee profile.'}, status=status.HTTP_403_FORBIDDEN)
+
+        if caller.role != Employee.ROLE_HR:
+            return None, Response({'error': 'Only HR can access staff memos.'}, status=status.HTTP_403_FORBIDDEN)
+
+        employee = Employee.objects.select_related('user').filter(pk=pk).first()
+        if not employee:
+            return None, Response({'error': 'Employee not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        return employee, None
+
+    def get(self, request, pk):
+        employee, error_response = self._get_target_employee(request, pk)
+        if error_response:
+            return error_response
+
+        memos = EmployeeMemo.objects.filter(employee=employee).select_related(
+            'employee__user', 'created_by__user'
+        )
+        serializer = EmployeeMemoSerializer(memos, many=True)
+        return Response(serializer.data)
+
+    def post(self, request, pk):
+        employee, error_response = self._get_target_employee(request, pk)
+        if error_response:
+            return error_response
+
+        memo_text = (
+            request.data.get('memo')
+            or request.data.get('text')
+            or request.data.get('message')
+            or ''
+        )
+        memo_text = str(memo_text).strip()
+        if not memo_text:
+            return Response({'error': 'memo is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        memo = EmployeeMemo.objects.create(
+            employee=employee,
+            memo=memo_text,
+            created_by=request.user.employee,
+        )
+        memo = EmployeeMemo.objects.select_related('employee__user', 'created_by__user').get(pk=memo.pk)
+        serializer = EmployeeMemoSerializer(memo)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class EmployeeMemoGroupedListView(APIView):
+    """HR-only endpoint to fetch all staff with their memos grouped by employee."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        try:
+            caller = request.user.employee
+        except Employee.DoesNotExist:
+            return Response({'error': 'No employee profile.'}, status=status.HTTP_403_FORBIDDEN)
+
+        if caller.role != Employee.ROLE_HR:
+            return Response({'error': 'Only HR can access staff memos.'}, status=status.HTTP_403_FORBIDDEN)
+
+        employees = Employee.objects.filter(role=Employee.ROLE_STAFF).select_related(
+            'user', 'department', 'appraiser__user', 'reviewer__user'
+        ).prefetch_related(
+            'reviewer_departments',
+            'appraiser_departments',
+            Prefetch(
+                'memos',
+                queryset=EmployeeMemo.objects.select_related('employee__user', 'created_by__user'),
+            ),
+        ).order_by('department__name', 'user__first_name', 'user__last_name')
+
+        serializer = EmployeeWithMemosSerializer(employees, many=True)
+        return Response(serializer.data)
 
 
