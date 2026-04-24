@@ -670,6 +670,8 @@ class EmployeeMemoListCreateView(APIView):
         employee = Employee.objects.select_related('user').filter(pk=pk).first()
         if not employee:
             return None, Response({'error': 'Employee not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if employee.role != Employee.ROLE_STAFF:
+            return None, Response({'error': 'Memos can only be added for staff employees.'}, status=status.HTTP_400_BAD_REQUEST)
 
         return employee, None
 
