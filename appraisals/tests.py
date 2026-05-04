@@ -132,6 +132,78 @@ class AppraisalPeriodFilterTests(APITestCase):
 		self.assertEqual(str(jan_kra.max_mark), '25.00')
 		self.assertEqual(str(apr_kra.max_mark), '10.00')
 
+	def test_template_apply_does_not_update_partial_overlap_period(self):
+		url = reverse('api_kra_template')
+		payload = {
+			'frame_config': {'steps': {'kra_objectives': True, 'competencies': False}},
+			'period_from': '2026-04-01',
+			'period_to': '2026-04-30',
+			'rows': [
+				{
+					'section': KRA.SECTION_KRA,
+					'sl_no': 1,
+					'max_mark': '18.00',
+				}
+			],
+		}
+
+		previous_frame_config = self.appraisal_apr_jun.frame_config
+		response = self.client.post(url, payload, format='json')
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['applied_appraisal_count'], 0)
+
+		self.appraisal_apr_jun.refresh_from_db()
+		self.assertEqual(self.appraisal_apr_jun.frame_config, previous_frame_config)
+
+		apr_kra = KRA.objects.get(appraisal=self.appraisal_apr_jun, section=KRA.SECTION_KRA, sl_no=1)
+		self.assertEqual(str(apr_kra.max_mark), '10.00')
+
+	def test_template_get_prefers_exact_period_match(self):
+		url = reverse('api_kra_template')
+
+		annual_payload = {
+			'frame_config': {'mode': 'annual-2026'},
+			'period_from': '2026-01-01',
+			'period_to': '2026-12-31',
+			'rows': [
+				{
+					'section': KRA.SECTION_KRA,
+					'sl_no': 1,
+					'max_mark': '30.00',
+				}
+			],
+		}
+		monthly_payload = {
+			'frame_config': {'mode': 'monthly-apr-2026'},
+			'period_from': '2026-04-01',
+			'period_to': '2026-04-30',
+			'rows': [
+				{
+					'section': KRA.SECTION_KRA,
+					'sl_no': 1,
+					'max_mark': '12.00',
+				}
+			],
+		}
+
+		annual_save = self.client.post(url, annual_payload, format='json')
+		monthly_save = self.client.post(url, monthly_payload, format='json')
+		self.assertEqual(annual_save.status_code, status.HTTP_200_OK)
+		self.assertEqual(monthly_save.status_code, status.HTTP_200_OK)
+
+		annual_get = self.client.get(url, {'period_from': '2026-01-01', 'period_to': '2026-12-31'})
+		self.assertEqual(annual_get.status_code, status.HTTP_200_OK)
+		self.assertEqual(annual_get.data['frame_config'], {'mode': 'annual-2026'})
+		self.assertEqual(annual_get.data['period_from'], '2026-01-01')
+		self.assertEqual(annual_get.data['period_to'], '2026-12-31')
+
+		monthly_get = self.client.get(url, {'period_from': '2026-04-01', 'period_to': '2026-04-30'})
+		self.assertEqual(monthly_get.status_code, status.HTTP_200_OK)
+		self.assertEqual(monthly_get.data['frame_config'], {'mode': 'monthly-apr-2026'})
+		self.assertEqual(monthly_get.data['period_from'], '2026-04-01')
+		self.assertEqual(monthly_get.data['period_to'], '2026-04-30')
+
 	def test_available_periods_endpoint_returns_distinct_periods(self):
 		url = reverse('api_appraisal_periods')
 		response = self.client.get(url)

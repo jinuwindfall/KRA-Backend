@@ -558,7 +558,9 @@ class KRATemplateAPI(generics.GenericAPIView):
         filter_start, filter_end = _parse_period_filters(request.query_params)
 
         templates = KRATemplate.objects.prefetch_related('rows').order_by('-updated_at', '-id')
-        if filter_start or filter_end:
+        if filter_start and filter_end:
+            templates = templates.filter(period_from=filter_start, period_to=filter_end)
+        elif filter_start or filter_end:
             templates = _apply_period_overlap_filter(templates, filter_start, filter_end)
         template = templates.first()
 
@@ -625,7 +627,6 @@ class KRATemplateAPI(generics.GenericAPIView):
         ])
 
         # Apply structure to all existing staff appraisals
-        from decimal import Decimal
         all_staff_appraisals = Appraisal.objects.filter(
             employee__role=Employee.ROLE_STAFF
         ).prefetch_related('kras')
@@ -634,7 +635,9 @@ class KRATemplateAPI(generics.GenericAPIView):
             all_staff_appraisals = all_staff_appraisals.filter(employee__department_id__in=department_ids)
         if staff_ids is not None:
             all_staff_appraisals = all_staff_appraisals.filter(employee_id__in=staff_ids)
-        if filter_start or filter_end:
+        if filter_start and filter_end:
+            all_staff_appraisals = all_staff_appraisals.filter(period_from=filter_start, period_to=filter_end)
+        elif filter_start or filter_end:
             all_staff_appraisals = _apply_period_overlap_filter(all_staff_appraisals, filter_start, filter_end)
 
         rows = list(template.rows.all())
