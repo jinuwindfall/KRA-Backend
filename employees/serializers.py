@@ -1,20 +1,37 @@
 from datetime import date
+import re
 
 from django.contrib.auth.models import User
-from django.utils.text import slugify
 from rest_framework import serializers
 from appraisals.models import Appraisal
-from .models import Department, Employee
+from .models import Department, Employee, EmployeeMemo
 
 
-def generate_unique_username(name, emp_id):
-    # Use full name as username (e.g. "Jinu Thomas")
-    candidate = (name or '').strip() or str(emp_id)
-    if not User.objects.filter(username=candidate).exists():
-        return candidate
-    # Conflict: append emp_id to ensure uniqueness
-    return f"{candidate}_{emp_id}"
-    return candidate
+def _normalize_username_base(name, emp_id):
+    merged = ''.join((name or '').split()).lower()
+    merged = re.sub(r'[^a-z0-9@.+_-]', '', merged)
+    if merged:
+        return merged
+    fallback = ''.join(str(emp_id or '').split()).lower()
+    fallback = re.sub(r'[^a-z0-9@.+_-]', '', fallback)
+    return fallback or 'user'
+
+
+def generate_unique_username(name, emp_id, exclude_user_id=None):
+    base = _normalize_username_base(name, emp_id)
+    candidate = base
+    suffix = 1
+    while True:
+        qs = User.objects.filter(username=candidate)
+        if exclude_user_id is not None:
+            qs = qs.exclude(id=exclude_user_id)
+        if not qs.exists():
+            return candidate
+        if suffix == 1:
+            candidate = f"{base}{_normalize_username_base('', emp_id)}"
+        else:
+            candidate = f"{base}{suffix}"
+        suffix += 1
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -167,7 +184,9 @@ class EmployeeCreateSerializer(serializers.Serializer):
             user.last_name = last_name.strip()
         if email is not None:
             user.email = email.strip()
-        user.save(update_fields=['first_name', 'last_name', 'email'])
+        full_name = f"{user.first_name} {user.last_name}".strip()
+        user.username = generate_unique_username(full_name, instance.emp_id, exclude_user_id=user.id)
+        user.save(update_fields=['first_name', 'last_name', 'email', 'username'])
 
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
@@ -179,3 +198,44 @@ class EmployeeCreateSerializer(serializers.Serializer):
             instance.appraiser_departments.set(appraiser_depts)
 
         return instance
+
+
+class EmployeeMemoSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.SerializerMethodField()
+    employee_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EmployeeMemo
+        fields = [
+            'id',
+            'employee',
+            'employee_name',
+            'memo',
+            'created_by',
+            'created_by_name',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = [
+            'id',
+            'created_by',
+            'created_by_name',
+            'employee_name',
+            'created_at',
+            'updated_at',
+        ]
+
+    def get_created_by_name(self, obj):
+        if not obj.created_by:
+            return ''
+        return obj.created_by.user.get_full_name() or obj.created_by.user.username
+
+    def get_employee_name(self, obj):
+        return obj.employee.user.get_full_name() or obj.employee.user.username
+
+
+class EmployeeWithMemosSerializer(EmployeeListSerializer):
+    memos = EmployeeMemoSerializer(many=True, read_only=True)
+
+    class Meta(EmployeeListSerializer.Meta):
+        fields = EmployeeListSerializer.Meta.fields + ['memos']

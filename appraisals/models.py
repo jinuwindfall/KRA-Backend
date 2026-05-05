@@ -92,12 +92,21 @@ class Appraisal(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        indexes = [
+            models.Index(fields=['period_from']),
+            models.Index(fields=['period_to']),
+            models.Index(fields=['employee', 'period_from', 'period_to']),
+        ]
+
     def __str__(self):
         return f"{self.employee.emp_id} - {self.period_from} to {self.period_to}"
 
 class KRATemplate(models.Model):
     """HR-designed master KRA structure. Single instance used as the template for all staff appraisals."""
     frame_config = models.JSONField(default=default_frame_config, blank=True)
+    period_from = models.DateField(null=True, blank=True)
+    period_to = models.DateField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

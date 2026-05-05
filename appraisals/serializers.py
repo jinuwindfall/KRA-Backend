@@ -160,4 +160,4 @@ class KRATemplateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = KRATemplate
-        fields = ['id', 'frame_config', 'rows', 'updated_at']
+        fields = ['id', 'frame_config', 'rows', 'period_from', 'period_to', 'updated_at']

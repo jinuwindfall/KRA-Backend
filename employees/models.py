@@ -79,3 +79,28 @@ class Employee(models.Model):
 
     def __str__(self):
         return f"{self.emp_id} - {self.user.get_full_name()}"
+
+
+class EmployeeMemo(models.Model):
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name='memos',
+    )
+    memo = models.TextField()
+    created_by = models.ForeignKey(
+        Employee,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='created_memos',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        creator = self.created_by.emp_id if self.created_by else 'system'
+        return f"Memo for {self.employee.emp_id} by {creator}"

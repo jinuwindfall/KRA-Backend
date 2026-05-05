@@ -1,8 +1,11 @@
 from datetime import date
 
 from rest_framework import generics, permissions, status
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
+from django.db.models import Count
+from django.db.models.functions import Coalesce
+from django.utils.dateparse import parse_date
 from .serializers import (
     AppraisalSerializer,
     AppraiserAppraisalSerializer,
@@ -15,6 +18,63 @@ from .serializers import (
 )
 from .models import Appraisal, KRA, KRATemplate, KRATemplateRow
 from employees.models import Employee
+
+
+def _parse_period_date(value, field_name):
+    if value in (None, ''):
+        return None
+    parsed = parse_date(str(value).strip())
+    if not parsed:
+        raise ValidationError({field_name: 'Invalid date format. Use YYYY-MM-DD.'})
+    return parsed
+
+
+def _parse_period_filters(params, allow_swap=False):
+    filter_start = _parse_period_date(params.get('period_from'), 'period_from')
+    filter_end = _parse_period_date(params.get('period_to'), 'period_to')
+
+    if filter_start and filter_end and filter_start > filter_end:
+        if allow_swap:
+            filter_start, filter_end = filter_end, filter_start
+        else:
+            raise ValidationError({'period_from': 'period_from cannot be greater than period_to.'})
+
+    return filter_start, filter_end
+
+
+def _apply_period_overlap_filter(qs, filter_start, filter_end, start_field='period_from', end_field='period_to'):
+    if not filter_start and not filter_end:
+        return qs
+
+    qs = qs.annotate(
+        appraisal_start=Coalesce(start_field, end_field),
+        appraisal_end=Coalesce(end_field, start_field),
+    ).exclude(appraisal_start__isnull=True).exclude(appraisal_end__isnull=True)
+
+    if filter_start:
+        qs = qs.filter(appraisal_end__gte=filter_start)
+    if filter_end:
+        qs = qs.filter(appraisal_start__lte=filter_end)
+    return qs
+
+
+def _parse_int_list(raw_value, field_name):
+    if raw_value in (None, ''):
+        return None
+
+    values = raw_value
+    if not isinstance(values, (list, tuple)):
+        values = str(raw_value).split(',')
+
+    parsed = []
+    for value in values:
+        text = str(value).strip()
+        if not text:
+            continue
+        if not text.isdigit():
+            raise ValidationError({field_name: f'Invalid integer value: {text}'})
+        parsed.append(int(text))
+    return parsed
 
 
 def get_common_structure_source(exclude_appraisal_id=None):
@@ -58,25 +118,70 @@ def clone_common_structure(appraisal):
 
 
 def ensure_current_year_appraisals(employee_qs):
+    employee_ids = list(employee_qs.values_list('id', flat=True))
+    if not employee_ids:
+        return
+
     today = date.today()
     period_from = date(today.year, 1, 1)
     period_to = date(today.year, 12, 31)
 
-    for emp in employee_qs:
-        existing = Appraisal.objects.filter(employee=emp).first()
-        if existing:
-            # If appraisal exists but has no KRAs yet, try to apply the structure now
-            if not existing.kras.exists():
-                clone_common_structure(existing)
-            continue
-        appraisal = Appraisal.objects.create(
-            employee=emp,
-            appraisal_type='Annual',
-            period_from=period_from,
-            period_to=period_to,
-            status=Appraisal.STATUS_DRAFT,
+    existing_emp_ids = set(
+        Appraisal.objects.filter(employee_id__in=employee_ids).values_list('employee_id', flat=True)
+    )
+    missing_emp_ids = [emp_id for emp_id in employee_ids if emp_id not in existing_emp_ids]
+
+    if missing_emp_ids:
+        Appraisal.objects.bulk_create([
+            Appraisal(
+                employee_id=emp_id,
+                appraisal_type='Annual',
+                period_from=period_from,
+                period_to=period_to,
+                status=Appraisal.STATUS_DRAFT,
+            )
+            for emp_id in missing_emp_ids
+        ])
+
+    appraisals = list(Appraisal.objects.filter(employee_id__in=employee_ids))
+    appraisal_ids = [app.id for app in appraisals]
+    if not appraisal_ids:
+        return
+
+    appraisal_ids_with_kras = set(
+        KRA.objects.filter(appraisal_id__in=appraisal_ids).values_list('appraisal_id', flat=True).distinct()
+    )
+    empty_appraisals = [app for app in appraisals if app.id not in appraisal_ids_with_kras]
+
+    if not empty_appraisals:
+        return
+
+    template = KRATemplate.objects.prefetch_related('rows').order_by('-id').first()
+    if not template:
+        return
+
+    rows = list(template.rows.all())
+    if not rows:
+        return
+
+    appraisals_to_update = [app for app in empty_appraisals if app.frame_config != template.frame_config]
+    if appraisals_to_update:
+        for app in appraisals_to_update:
+            app.frame_config = template.frame_config
+        Appraisal.objects.bulk_update(appraisals_to_update, ['frame_config'])
+
+    KRA.objects.bulk_create([
+        KRA(
+            appraisal_id=app.id,
+            section=row.section,
+            sl_no=row.sl_no,
+            title='',
+            description='',
+            max_mark=row.max_mark,
         )
-        clone_common_structure(appraisal)
+        for app in empty_appraisals
+        for row in rows
+    ])
 
 
 class IsAuthenticatedEmployee(permissions.BasePermission):
@@ -113,6 +218,7 @@ class AppraisalListCreateAPI(generics.ListCreateAPIView):
 
     def get_queryset(self):
         employee = self.request.user.employee
+        filter_start, filter_end = _parse_period_filters(self.request.query_params)
 
         if employee.role == Employee.ROLE_HR:
             visible_employees = Employee.objects.filter(role=Employee.ROLE_STAFF)
@@ -134,8 +240,19 @@ class AppraisalListCreateAPI(generics.ListCreateAPIView):
 
         ensure_current_year_appraisals(visible_employees)
 
-        qs = Appraisal.objects.select_related('employee', 'employee__user', 'employee__department').prefetch_related('kras').order_by('employee__department__name', 'employee__user__first_name', 'employee__user__last_name')
-        return self._filter_qs(qs)
+        qs = Appraisal.objects.select_related(
+            'employee',
+            'employee__user',
+            'employee__department',
+            'employee__appraiser__user',
+            'employee__reviewer__user',
+        ).prefetch_related('kras').order_by(
+            'employee__department__name',
+            'employee__user__first_name',
+            'employee__user__last_name',
+        )
+        qs = self._filter_qs(qs)
+        return _apply_period_overlap_filter(qs, filter_start, filter_end)
 
     def get_serializer_class(self):
         employee = self.request.user.employee
@@ -178,7 +295,13 @@ class AppraisalDetailAPI(generics.RetrieveUpdateAPIView):
         return qs.filter(employee=employee)
 
     def get_queryset(self):
-        qs = Appraisal.objects.select_related('employee', 'employee__user').prefetch_related('kras')
+        qs = Appraisal.objects.select_related(
+            'employee',
+            'employee__user',
+            'employee__department',
+            'employee__appraiser__user',
+            'employee__reviewer__user',
+        ).prefetch_related('kras')
         return self._filter_qs(qs)
 
     def get_serializer_class(self):
@@ -248,6 +371,7 @@ class KRAListCreateAPI(generics.ListCreateAPIView):
 
     def get_queryset(self):
         employee = self.request.user.employee
+        filter_start, filter_end = _parse_period_filters(self.request.query_params)
         qs = KRA.objects.select_related('appraisal', 'appraisal__employee')
         appraisal_id = self.request.query_params.get('appraisal')
         section = self.request.query_params.get('section')
@@ -256,16 +380,25 @@ class KRAListCreateAPI(generics.ListCreateAPIView):
         if section:
             qs = qs.filter(section=section)
         if employee.role == Employee.ROLE_HR:
-            return qs
-        if employee.role == Employee.ROLE_REVIEWER:
+            scoped_qs = qs
+        elif employee.role == Employee.ROLE_REVIEWER:
             dept_ids = list(employee.reviewer_departments.values_list('id', flat=True))
             reviewer_qs = qs.filter(appraisal__employee__reviewer=employee)
-            return reviewer_qs.filter(appraisal__employee__department_id__in=dept_ids) if dept_ids else reviewer_qs
-        if employee.role == Employee.ROLE_APPRAISER:
+            scoped_qs = reviewer_qs.filter(appraisal__employee__department_id__in=dept_ids) if dept_ids else reviewer_qs
+        elif employee.role == Employee.ROLE_APPRAISER:
             dept_ids = list(employee.appraiser_departments.values_list('id', flat=True))
             appraiser_qs = qs.filter(appraisal__employee__appraiser=employee)
-            return appraiser_qs.filter(appraisal__employee__department_id__in=dept_ids) if dept_ids else appraiser_qs
-        return qs.filter(appraisal__employee=employee)
+            scoped_qs = appraiser_qs.filter(appraisal__employee__department_id__in=dept_ids) if dept_ids else appraiser_qs
+        else:
+            scoped_qs = qs.filter(appraisal__employee=employee)
+
+        return _apply_period_overlap_filter(
+            scoped_qs,
+            filter_start,
+            filter_end,
+            start_field='appraisal__period_from',
+            end_field='appraisal__period_to',
+        )
 
     def perform_create(self, serializer):
         employee = self.request.user.employee
@@ -372,8 +505,45 @@ class MyAppraisalAPI(generics.ListAPIView):
 
     def get_queryset(self):
         employee = self.request.user.employee
+        filter_start, filter_end = _parse_period_filters(self.request.query_params)
         ensure_current_year_appraisals(Employee.objects.filter(pk=employee.pk))
-        return Appraisal.objects.select_related('employee', 'employee__user').prefetch_related('kras').filter(employee=employee)
+        qs = Appraisal.objects.select_related(
+            'employee',
+            'employee__user',
+            'employee__department',
+            'employee__appraiser__user',
+            'employee__reviewer__user',
+        ).prefetch_related('kras').filter(employee=employee)
+        return _apply_period_overlap_filter(qs, filter_start, filter_end)
+
+
+class AvailableAppraisalPeriodsAPI(generics.GenericAPIView):
+    permission_classes = [IsAuthenticatedEmployee]
+
+    def get(self, request, *args, **kwargs):
+        employee = request.user.employee
+        qs = Appraisal.objects.select_related('employee')
+
+        if employee.role == Employee.ROLE_HR:
+            qs = qs.all()
+        elif employee.role == Employee.ROLE_REVIEWER:
+            dept_ids = list(employee.reviewer_departments.values_list('id', flat=True))
+            reviewer_qs = qs.filter(employee__reviewer=employee)
+            qs = reviewer_qs.filter(employee__department_id__in=dept_ids) if dept_ids else reviewer_qs
+        elif employee.role == Employee.ROLE_APPRAISER:
+            dept_ids = list(employee.appraiser_departments.values_list('id', flat=True))
+            appraiser_qs = qs.filter(employee__appraiser=employee)
+            qs = appraiser_qs.filter(employee__department_id__in=dept_ids) if dept_ids else appraiser_qs
+        else:
+            qs = qs.filter(employee=employee)
+
+        periods = (
+            qs.exclude(period_from__isnull=True, period_to__isnull=True)
+            .values('period_from', 'period_to')
+            .annotate(appraisal_count=Count('id'))
+            .order_by('-period_from', '-period_to')
+        )
+        return Response(list(periods), status=status.HTTP_200_OK)
 
 
 class KRATemplateAPI(generics.GenericAPIView):
@@ -385,9 +555,26 @@ class KRATemplateAPI(generics.GenericAPIView):
     permission_classes = [IsAuthenticatedEmployee]
 
     def get(self, request, *args, **kwargs):
-        template = KRATemplate.objects.prefetch_related('rows').order_by('-id').first()
+        filter_start, filter_end = _parse_period_filters(request.query_params)
+
+        templates = KRATemplate.objects.prefetch_related('rows').order_by('-updated_at', '-id')
+        if filter_start and filter_end:
+            templates = templates.filter(period_from=filter_start, period_to=filter_end)
+        elif filter_start or filter_end:
+            templates = _apply_period_overlap_filter(templates, filter_start, filter_end)
+        template = templates.first()
+
         if not template:
-            return Response({'id': None, 'frame_config': None, 'rows': [], 'updated_at': None})
+            return Response(
+                {
+                    'id': None,
+                    'frame_config': None,
+                    'rows': [],
+                    'period_from': None,
+                    'period_to': None,
+                    'updated_at': None,
+                }
+            )
         serializer = self.get_serializer(template)
         return Response(serializer.data)
 
@@ -398,14 +585,36 @@ class KRATemplateAPI(generics.GenericAPIView):
         frame_config = request.data.get('frame_config', {})
         rows_data = request.data.get('rows', [])
 
-        # Upsert singleton template
-        template = KRATemplate.objects.order_by('-id').first()
+        if bool(request.data.get('period_from')) ^ bool(request.data.get('period_to')):
+            raise ValidationError({'period': 'Both period_from and period_to are required together.'})
+        filter_start, filter_end = _parse_period_filters(request.data)
+
+        department_ids = _parse_int_list(request.data.get('department_ids'), 'department_ids')
+        staff_ids = _parse_int_list(
+            request.data.get('employee_ids', request.data.get('staff_ids')),
+            'employee_ids',
+        )
+
+        # Upsert period-scoped template when a period is provided.
+        template_qs = KRATemplate.objects.order_by('-id')
+        if filter_start and filter_end:
+            template_qs = template_qs.filter(period_from=filter_start, period_to=filter_end)
+        else:
+            template_qs = template_qs.filter(period_from__isnull=True, period_to__isnull=True)
+
+        template = template_qs.first()
         if template:
             template.frame_config = frame_config
-            template.save(update_fields=['frame_config', 'updated_at'])
+            template.period_from = filter_start
+            template.period_to = filter_end
+            template.save(update_fields=['frame_config', 'period_from', 'period_to', 'updated_at'])
             template.rows.all().delete()
         else:
-            template = KRATemplate.objects.create(frame_config=frame_config)
+            template = KRATemplate.objects.create(
+                frame_config=frame_config,
+                period_from=filter_start,
+                period_to=filter_end,
+            )
 
         KRATemplateRow.objects.bulk_create([
             KRATemplateRow(
@@ -417,13 +626,60 @@ class KRATemplateAPI(generics.GenericAPIView):
             for row in rows_data
         ])
 
-        # Apply structure to all existing staff appraisals
-        from decimal import Decimal
+        # Determine target staff first (for optional department/staff scoped rollout).
+        target_staff = Employee.objects.filter(role=Employee.ROLE_STAFF)
+        if department_ids is not None:
+            target_staff = target_staff.filter(department_id__in=department_ids)
+        if staff_ids is not None:
+            target_staff = target_staff.filter(id__in=staff_ids)
+
+        # For period-scoped templates, ensure appraisals exist for that exact period.
+        if filter_start and filter_end:
+            target_staff_ids = list(target_staff.values_list('id', flat=True))
+            existing_ids = set(
+                Appraisal.objects.filter(
+                    employee_id__in=target_staff_ids,
+                    period_from=filter_start,
+                    period_to=filter_end,
+                ).values_list('employee_id', flat=True)
+            )
+            missing_ids = [emp_id for emp_id in target_staff_ids if emp_id not in existing_ids]
+
+            if missing_ids:
+                default_type = (
+                    frame_config.get('appraisal_options', {}).get('default_type')
+                    if isinstance(frame_config, dict)
+                    else None
+                ) or 'Annual'
+
+                Appraisal.objects.bulk_create([
+                    Appraisal(
+                        employee_id=emp_id,
+                        appraisal_type=default_type,
+                        period_from=filter_start,
+                        period_to=filter_end,
+                        status=Appraisal.STATUS_DRAFT,
+                        frame_config=frame_config,
+                    )
+                    for emp_id in missing_ids
+                ])
+
+        # Apply structure to existing and newly-created appraisals.
         all_staff_appraisals = Appraisal.objects.filter(
             employee__role=Employee.ROLE_STAFF
         ).prefetch_related('kras')
 
+        if department_ids is not None:
+            all_staff_appraisals = all_staff_appraisals.filter(employee__department_id__in=department_ids)
+        if staff_ids is not None:
+            all_staff_appraisals = all_staff_appraisals.filter(employee_id__in=staff_ids)
+        if filter_start and filter_end:
+            all_staff_appraisals = all_staff_appraisals.filter(period_from=filter_start, period_to=filter_end)
+        elif filter_start or filter_end:
+            all_staff_appraisals = _apply_period_overlap_filter(all_staff_appraisals, filter_start, filter_end)
+
         rows = list(template.rows.all())
+        applied_count = all_staff_appraisals.count()
         for appraisal in all_staff_appraisals:
             appraisal.frame_config = frame_config
             appraisal.save(update_fields=['frame_config'])
@@ -457,5 +713,7 @@ class KRATemplateAPI(generics.GenericAPIView):
                     )
 
         serializer = self.get_serializer(template)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        payload = serializer.data
+        payload['applied_appraisal_count'] = applied_count
+        return Response(payload, status=status.HTTP_200_OK)
 
