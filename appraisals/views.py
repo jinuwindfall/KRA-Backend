@@ -626,7 +626,45 @@ class KRATemplateAPI(generics.GenericAPIView):
             for row in rows_data
         ])
 
-        # Apply structure to all existing staff appraisals
+        # Determine target staff first (for optional department/staff scoped rollout).
+        target_staff = Employee.objects.filter(role=Employee.ROLE_STAFF)
+        if department_ids is not None:
+            target_staff = target_staff.filter(department_id__in=department_ids)
+        if staff_ids is not None:
+            target_staff = target_staff.filter(id__in=staff_ids)
+
+        # For period-scoped templates, ensure appraisals exist for that exact period.
+        if filter_start and filter_end:
+            target_staff_ids = list(target_staff.values_list('id', flat=True))
+            existing_ids = set(
+                Appraisal.objects.filter(
+                    employee_id__in=target_staff_ids,
+                    period_from=filter_start,
+                    period_to=filter_end,
+                ).values_list('employee_id', flat=True)
+            )
+            missing_ids = [emp_id for emp_id in target_staff_ids if emp_id not in existing_ids]
+
+            if missing_ids:
+                default_type = (
+                    frame_config.get('appraisal_options', {}).get('default_type')
+                    if isinstance(frame_config, dict)
+                    else None
+                ) or 'Annual'
+
+                Appraisal.objects.bulk_create([
+                    Appraisal(
+                        employee_id=emp_id,
+                        appraisal_type=default_type,
+                        period_from=filter_start,
+                        period_to=filter_end,
+                        status=Appraisal.STATUS_DRAFT,
+                        frame_config=frame_config,
+                    )
+                    for emp_id in missing_ids
+                ])
+
+        # Apply structure to existing and newly-created appraisals.
         all_staff_appraisals = Appraisal.objects.filter(
             employee__role=Employee.ROLE_STAFF
         ).prefetch_related('kras')
