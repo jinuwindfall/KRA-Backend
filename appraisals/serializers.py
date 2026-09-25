@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 from .models import Appraisal, KRA, KRATemplate, KRATemplateRow
 
@@ -13,6 +15,7 @@ class AppraisalDisplayMixin:
         data['employee_department'] = emp.department.name if emp.department else 'Unassigned Department'
         data['appraiser_name'] = emp.appraiser.user.get_full_name() if emp.appraiser else ''
         data['reviewer_name'] = emp.reviewer.user.get_full_name() if emp.reviewer else ''
+        data['memo_total_deduction'] = sum((memo.deduction for memo in emp.memos.all()), Decimal('0'))
         return data
 
 

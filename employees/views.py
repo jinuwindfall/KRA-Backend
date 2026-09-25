@@ -1,6 +1,7 @@
 import csv
 import io
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
@@ -9,6 +10,7 @@ from django.db.models import Prefetch
 from django.utils.dateparse import parse_date
 from rest_framework import permissions, status
 from rest_framework.authtoken.models import Token
+from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -675,6 +677,18 @@ class EmployeeMemoListCreateView(APIView):
 
         return employee, None
 
+    @staticmethod
+    def _parse_deduction(raw_value):
+        if raw_value in (None, ''):
+            return Decimal('0')
+        try:
+            value = Decimal(str(raw_value))
+        except (InvalidOperation, ValueError):
+            raise ValidationError({'deduction': 'deduction must be a valid number.'})
+        if value < 0:
+            raise ValidationError({'deduction': 'deduction must be >= 0.'})
+        return value
+
     def get(self, request, pk):
         employee, error_response = self._get_target_employee(request, pk)
         if error_response:
@@ -701,14 +715,72 @@ class EmployeeMemoListCreateView(APIView):
         if not memo_text:
             return Response({'error': 'memo is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        try:
+            deduction = self._parse_deduction(request.data.get('deduction'))
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
         memo = EmployeeMemo.objects.create(
             employee=employee,
             memo=memo_text,
+            deduction=deduction,
             created_by=request.user.employee,
         )
         memo = EmployeeMemo.objects.select_related('employee__user', 'created_by__user').get(pk=memo.pk)
         serializer = EmployeeMemoSerializer(memo)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class EmployeeMemoDetailView(APIView):
+    """HR-only endpoint to update/delete a single staff memo."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _get_memo(self, request, pk, memo_id):
+        try:
+            caller = request.user.employee
+        except Employee.DoesNotExist:
+            return None, Response({'error': 'No employee profile.'}, status=status.HTTP_403_FORBIDDEN)
+
+        if caller.role != Employee.ROLE_HR:
+            return None, Response({'error': 'Only HR can modify staff memos.'}, status=status.HTTP_403_FORBIDDEN)
+
+        memo = EmployeeMemo.objects.select_related('employee__user', 'created_by__user').filter(
+            pk=memo_id, employee_id=pk
+        ).first()
+        if not memo:
+            return None, Response({'error': 'Memo not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        return memo, None
+
+    def patch(self, request, pk, memo_id):
+        memo, error_response = self._get_memo(request, pk, memo_id)
+        if error_response:
+            return error_response
+
+        memo_text = request.data.get('memo')
+        if memo_text is not None:
+            memo_text = str(memo_text).strip()
+            if not memo_text:
+                return Response({'error': 'memo cannot be empty.'}, status=status.HTTP_400_BAD_REQUEST)
+            memo.memo = memo_text
+
+        if 'deduction' in request.data:
+            try:
+                memo.deduction = EmployeeMemoListCreateView._parse_deduction(request.data.get('deduction'))
+            except ValidationError as exc:
+                return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        memo.save(update_fields=['memo', 'deduction', 'updated_at'])
+        serializer = EmployeeMemoSerializer(memo)
+        return Response(serializer.data)
+
+    def delete(self, request, pk, memo_id):
+        memo, error_response = self._get_memo(request, pk, memo_id)
+        if error_response:
+            return error_response
+
+        memo.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class EmployeeMemoGroupedListView(APIView):

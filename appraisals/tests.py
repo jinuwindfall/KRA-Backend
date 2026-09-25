@@ -332,3 +332,58 @@ class AppraisalWorkflowOrderTests(APITestCase):
 		response = self.client.patch(url, {'appraiser_mark': '8'}, format='json')
 
 		self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+
+class AppraisalMemoDeductionTests(APITestCase):
+	"""Memo deductions HR logs against a staff member should surface on their appraisal."""
+
+	def setUp(self):
+		from employees.models import EmployeeMemo
+
+		self.EmployeeMemo = EmployeeMemo
+		self.department = Department.objects.create(name='Operations')
+
+		self.hr_user = User.objects.create_user(username='hrmemo', password='pass1234')
+		self.hr_employee = Employee.objects.create(
+			user=self.hr_user,
+			emp_id='HR010',
+			designation='HR Manager',
+			role=Employee.ROLE_HR,
+			department=self.department,
+		)
+
+		self.staff_user = User.objects.create_user(username='staffmemo', password='pass1234')
+		self.staff_employee = Employee.objects.create(
+			user=self.staff_user,
+			emp_id='ST010',
+			designation='Engineer',
+			role=Employee.ROLE_STAFF,
+			department=self.department,
+		)
+
+		self.appraisal = Appraisal.objects.create(
+			employee=self.staff_employee,
+			appraisal_type='Annual',
+			period_from=date(2026, 1, 1),
+			period_to=date(2026, 12, 31),
+			status=Appraisal.STATUS_DRAFT,
+		)
+
+	def test_memo_total_deduction_sums_all_memos_on_appraisal(self):
+		self.EmployeeMemo.objects.create(employee=self.staff_employee, memo='Late arrival', deduction='1.50')
+		self.EmployeeMemo.objects.create(employee=self.staff_employee, memo='Missed deadline', deduction='2.00')
+
+		self.client.force_authenticate(user=self.hr_user)
+		url = reverse('api_appraisal_detail', args=[self.appraisal.id])
+		response = self.client.get(url)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(str(response.data['memo_total_deduction']), '3.50')
+
+	def test_memo_total_deduction_is_zero_with_no_memos(self):
+		self.client.force_authenticate(user=self.hr_user)
+		url = reverse('api_appraisal_detail', args=[self.appraisal.id])
+		response = self.client.get(url)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(str(response.data['memo_total_deduction']), '0')

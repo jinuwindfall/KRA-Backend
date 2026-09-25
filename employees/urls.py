@@ -5,6 +5,7 @@ from .views import (
     EmployeeBulkImportView,
     EmployeeMemoGroupedListView,
     EmployeeMemoListCreateView,
+    EmployeeMemoDetailView,
     ResetPasswordView, ChangePasswordView,
 )
 
@@ -19,6 +20,7 @@ urlpatterns = [
     path('api/employees/memos/', EmployeeMemoGroupedListView.as_view(), name='api_employee_memos_grouped'),
     path('api/employees/<int:pk>/', EmployeeDetailView.as_view(), name='api_employee_detail'),
     path('api/employees/<int:pk>/memos/', EmployeeMemoListCreateView.as_view(), name='api_employee_memos'),
+    path('api/employees/<int:pk>/memos/<int:memo_id>/', EmployeeMemoDetailView.as_view(), name='api_employee_memo_detail'),
     path('api/employees/import/', EmployeeBulkImportView.as_view(), name='api_employees_import'),
     path('api/employees/<int:pk>/reviewer-departments/', ReviewerDepartmentsView.as_view(), name='api_reviewer_departments'),
     path('api/employees/<int:pk>/appraiser-departments/', AppraiserDepartmentsView.as_view(), name='api_appraiser_departments'),

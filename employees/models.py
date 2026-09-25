@@ -88,6 +88,7 @@ class EmployeeMemo(models.Model):
         related_name='memos',
     )
     memo = models.TextField()
+    deduction = models.DecimalField(max_digits=6, decimal_places=2, default=0)
     created_by = models.ForeignKey(
         Employee,
         null=True,

@@ -100,3 +100,50 @@ class EmployeeMemoAPITests(APITestCase):
 		self.assertEqual(response.data[0]['id'], self.staff_employee.id)
 		self.assertEqual(len(response.data[0]['memos']), 1)
 		self.assertEqual(response.data[0]['memos'][0]['memo'], 'Follow-up memo for Q1 review.')
+
+	def test_hr_can_create_memo_with_deduction(self):
+		url = reverse('api_employee_memos', kwargs={'pk': self.staff_employee.pk})
+		payload = {'memo': 'Unapproved leave.', 'deduction': '2.50'}
+
+		response = self.client.post(url, payload, format='json')
+
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.assertEqual(response.data['deduction'], '2.50')
+		memo = EmployeeMemo.objects.get(employee=self.staff_employee)
+		self.assertEqual(str(memo.deduction), '2.50')
+
+	def test_memo_deduction_must_be_non_negative(self):
+		url = reverse('api_employee_memos', kwargs={'pk': self.staff_employee.pk})
+		response = self.client.post(url, {'memo': 'Bad value', 'deduction': '-1'}, format='json')
+
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertEqual(EmployeeMemo.objects.count(), 0)
+
+	def test_hr_can_update_memo_deduction(self):
+		memo = EmployeeMemo.objects.create(
+			employee=self.staff_employee,
+			memo='Initial note',
+			deduction='1.00',
+			created_by=self.hr_employee,
+		)
+
+		url = reverse('api_employee_memo_detail', kwargs={'pk': self.staff_employee.pk, 'memo_id': memo.id})
+		response = self.client.patch(url, {'deduction': '3.00'}, format='json')
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		memo.refresh_from_db()
+		self.assertEqual(str(memo.deduction), '3.00')
+
+	def test_hr_can_delete_memo(self):
+		memo = EmployeeMemo.objects.create(
+			employee=self.staff_employee,
+			memo='To be removed',
+			deduction='1.00',
+			created_by=self.hr_employee,
+		)
+
+		url = reverse('api_employee_memo_detail', kwargs={'pk': self.staff_employee.pk, 'memo_id': memo.id})
+		response = self.client.delete(url)
+
+		self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+		self.assertFalse(EmployeeMemo.objects.filter(pk=memo.id).exists())

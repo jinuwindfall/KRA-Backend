@@ -246,7 +246,7 @@ class AppraisalListCreateAPI(generics.ListCreateAPIView):
             'employee__department',
             'employee__appraiser__user',
             'employee__reviewer__user',
-        ).prefetch_related('kras').order_by(
+        ).prefetch_related('kras', 'employee__memos').order_by(
             'employee__department__name',
             'employee__user__first_name',
             'employee__user__last_name',
@@ -301,7 +301,7 @@ class AppraisalDetailAPI(generics.RetrieveUpdateAPIView):
             'employee__department',
             'employee__appraiser__user',
             'employee__reviewer__user',
-        ).prefetch_related('kras')
+        ).prefetch_related('kras', 'employee__memos')
         return self._filter_qs(qs)
 
     def get_serializer_class(self):
@@ -516,7 +516,7 @@ class MyAppraisalAPI(generics.ListAPIView):
             'employee__department',
             'employee__appraiser__user',
             'employee__reviewer__user',
-        ).prefetch_related('kras').filter(employee=employee)
+        ).prefetch_related('kras', 'employee__memos').filter(employee=employee)
         return _apply_period_overlap_filter(qs, filter_start, filter_end)
 
 
