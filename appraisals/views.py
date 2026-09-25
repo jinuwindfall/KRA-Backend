@@ -323,28 +323,28 @@ class AppraisalDetailAPI(generics.RetrieveUpdateAPIView):
         # Determine if this is a submit action vs a save-draft action
         new_status = data.get('status')
 
-        if employee.role == Employee.ROLE_APPRAISER:
-            # Appraiser goes first, right after HR frames the KRA — can only edit while Draft
+        if employee.role == Employee.ROLE_STAFF:
+            # Staff (appraisee) can only edit when status is Draft
             if appraisal.status != Appraisal.STATUS_DRAFT:
                 raise PermissionDenied('You cannot edit after submission.')
-            # Only allow submitting to Appraiser Submitted — not jumping to other statuses
-            if new_status and new_status != Appraisal.STATUS_APPRAISER_SUBMITTED:
-                raise PermissionDenied('Appraisers can only advance status to Appraiser Submitted.')
-
-        elif employee.role == Employee.ROLE_STAFF:
-            # Staff can only work once the appraiser has added content and submitted
-            if appraisal.status == Appraisal.STATUS_DRAFT:
-                raise PermissionDenied('Appraiser has not added content yet.')
-            if appraisal.status == Appraisal.STATUS_EMPLOYEE_SUBMITTED and new_status is None:
-                raise PermissionDenied('You have already submitted this appraisal.')
-            # Only allow submitting to Employee Submitted
+            # Only allow submitting to Employee Submitted — not jumping to other statuses
             if new_status and new_status != Appraisal.STATUS_EMPLOYEE_SUBMITTED:
                 raise PermissionDenied('Staff can only advance status to Employee Submitted.')
 
-        elif employee.role == Employee.ROLE_REVIEWER:
-            # Reviewer can only work once the employee has submitted their marks
-            if appraisal.status in (Appraisal.STATUS_DRAFT, Appraisal.STATUS_APPRAISER_SUBMITTED):
+        elif employee.role == Employee.ROLE_APPRAISER:
+            # Appraiser can only work once the appraisee has submitted
+            if appraisal.status == Appraisal.STATUS_DRAFT:
                 raise PermissionDenied('Employee has not submitted yet.')
+            if appraisal.status == Appraisal.STATUS_APPRAISER_SUBMITTED and new_status is None:
+                raise PermissionDenied('You have already submitted this appraisal.')
+            # Only allow submitting to Appraiser Submitted
+            if new_status and new_status != Appraisal.STATUS_APPRAISER_SUBMITTED:
+                raise PermissionDenied('Appraisers can only advance status to Appraiser Submitted.')
+
+        elif employee.role == Employee.ROLE_REVIEWER:
+            # Reviewer can only work once the appraiser has submitted
+            if appraisal.status in (Appraisal.STATUS_DRAFT, Appraisal.STATUS_EMPLOYEE_SUBMITTED):
+                raise PermissionDenied('Appraiser has not submitted yet.')
             if appraisal.status == Appraisal.STATUS_REVIEWED and new_status is None:
                 raise PermissionDenied('You have already submitted this appraisal.')
             # Only allow submitting to Reviewed
@@ -447,24 +447,26 @@ class KRADetailAPI(generics.RetrieveUpdateDestroyAPIView):
             raise PermissionDenied('Mark entry is locked by HR.')
 
         # Status-based write restrictions
-        if employee.role == Employee.ROLE_APPRAISER:
-            # Appraiser adds content and marks first, right after HR frames the KRA
+        if employee.role == Employee.ROLE_STAFF:
             if appraisal.status != Appraisal.STATUS_DRAFT:
                 raise PermissionDenied('You cannot edit marks after submission.')
+
+        elif employee.role == Employee.ROLE_APPRAISER:
             allowed_fields = {'title', 'description', 'appraiser_mark'}
             invalid_fields = set(request.data.keys()) - allowed_fields
             if invalid_fields:
                 raise PermissionDenied('Appraisers can only add content to the HR-framed KRA and enter their marks.')
-
-        elif employee.role == Employee.ROLE_STAFF:
-            if appraisal.status == Appraisal.STATUS_DRAFT:
-                raise PermissionDenied('Appraiser has not added content yet.')
-            if appraisal.status != Appraisal.STATUS_APPRAISER_SUBMITTED:
-                raise PermissionDenied('You cannot edit marks after submission.')
+            # Content (title/description) can be added any time, independent of the marking
+            # pipeline below — only appraiser_mark itself needs the appraisee to have submitted.
+            if is_mark_update:
+                if appraisal.status == Appraisal.STATUS_DRAFT:
+                    raise PermissionDenied('Employee has not submitted yet.')
+                if appraisal.status == Appraisal.STATUS_APPRAISER_SUBMITTED:
+                    raise PermissionDenied('You have already submitted this appraisal.')
 
         elif employee.role == Employee.ROLE_REVIEWER:
-            if appraisal.status in (Appraisal.STATUS_DRAFT, Appraisal.STATUS_APPRAISER_SUBMITTED):
-                raise PermissionDenied('Employee has not submitted yet.')
+            if appraisal.status in (Appraisal.STATUS_DRAFT, Appraisal.STATUS_EMPLOYEE_SUBMITTED):
+                raise PermissionDenied('Appraiser has not submitted yet.')
             if appraisal.status == Appraisal.STATUS_REVIEWED:
                 raise PermissionDenied('You have already submitted this appraisal.')
             allowed_fields = {'reviewer_mark'}

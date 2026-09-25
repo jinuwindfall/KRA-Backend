@@ -48,15 +48,17 @@ def default_frame_config():
 
 
 class Appraisal(models.Model):
-    # Workflow order: HR frames -> Appraiser adds content/marks -> Employee marks -> Reviewer finalizes.
+    # Marking order: HR frames -> Appraisee marks -> Appraiser marks -> Reviewer finalizes.
+    # (The appraiser's KRA *content* - title/description - is separate from this pipeline
+    # and can be added any time after HR frames the structure; see KRADetailAPI.)
     STATUS_DRAFT = 'Draft'
-    STATUS_APPRAISER_SUBMITTED = 'Appraiser Submitted'
     STATUS_EMPLOYEE_SUBMITTED = 'Employee Submitted'
+    STATUS_APPRAISER_SUBMITTED = 'Appraiser Submitted'
     STATUS_REVIEWED = 'Reviewed'
     STATUS_CHOICES = [
         (STATUS_DRAFT, 'Draft'),
-        (STATUS_APPRAISER_SUBMITTED, 'Appraiser Submitted'),
         (STATUS_EMPLOYEE_SUBMITTED, 'Employee Submitted'),
+        (STATUS_APPRAISER_SUBMITTED, 'Appraiser Submitted'),
         (STATUS_REVIEWED, 'Reviewed'),
     ]
 

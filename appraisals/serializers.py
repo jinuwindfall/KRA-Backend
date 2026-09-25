@@ -36,6 +36,7 @@ class KRASerializerHideAppraisee(serializers.ModelSerializer):
         from .models import Appraisal
         if obj.appraisal.status in (
             Appraisal.STATUS_EMPLOYEE_SUBMITTED,
+            Appraisal.STATUS_APPRAISER_SUBMITTED,
             Appraisal.STATUS_REVIEWED,
         ):
             return obj.appraisee_mark

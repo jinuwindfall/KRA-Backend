@@ -223,7 +223,7 @@ class AppraisalPeriodFilterTests(APITestCase):
 
 
 class AppraisalWorkflowOrderTests(APITestCase):
-	"""HR frames -> Appraiser adds content/marks -> Staff marks -> Reviewer finalizes."""
+	"""HR frames -> Appraiser adds content (any time) -> Appraisee marks -> Appraiser marks -> Reviewer finalizes."""
 
 	def setUp(self):
 		self.department = Department.objects.create(name='Engineering')
@@ -274,19 +274,26 @@ class AppraisalWorkflowOrderTests(APITestCase):
 		self.kra.refresh_from_db()
 		self.assertEqual(self.kra.title, 'Customer Satisfaction')
 
-	def test_staff_cannot_mark_before_appraiser_submits(self):
+	def test_staff_can_mark_while_draft(self):
 		self.client.force_authenticate(user=self.staff_user)
 		url = reverse('api_kra_detail', args=[self.kra.id])
 		response = self.client.patch(url, {'appraisee_mark': '8'}, format='json')
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+	def test_appraiser_cannot_mark_before_staff_submits(self):
+		self.client.force_authenticate(user=self.appraiser_user)
+		url = reverse('api_kra_detail', args=[self.kra.id])
+		response = self.client.patch(url, {'appraiser_mark': '8'}, format='json')
 
 		self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-	def test_staff_can_mark_after_appraiser_submits(self):
-		self.appraisal.status = Appraisal.STATUS_APPRAISER_SUBMITTED
+	def test_appraiser_can_mark_after_staff_submits(self):
+		self.appraisal.status = Appraisal.STATUS_EMPLOYEE_SUBMITTED
 		self.appraisal.save(update_fields=['status'])
 
-		self.client.force_authenticate(user=self.staff_user)
+		self.client.force_authenticate(user=self.appraiser_user)
 		url = reverse('api_kra_detail', args=[self.kra.id])
-		response = self.client.patch(url, {'appraisee_mark': '8'}, format='json')
+		response = self.client.patch(url, {'appraiser_mark': '8'}, format='json')
 
 		self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
