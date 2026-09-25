@@ -48,14 +48,15 @@ def default_frame_config():
 
 
 class Appraisal(models.Model):
+    # Workflow order: HR frames -> Appraiser adds content/marks -> Employee marks -> Reviewer finalizes.
     STATUS_DRAFT = 'Draft'
-    STATUS_SUBMITTED = 'Submitted'
-    STATUS_APPRAISER_REVIEWED = 'Appraiser Reviewed'
+    STATUS_APPRAISER_SUBMITTED = 'Appraiser Submitted'
+    STATUS_EMPLOYEE_SUBMITTED = 'Employee Submitted'
     STATUS_REVIEWED = 'Reviewed'
     STATUS_CHOICES = [
         (STATUS_DRAFT, 'Draft'),
-        (STATUS_SUBMITTED, 'Submitted'),
-        (STATUS_APPRAISER_REVIEWED, 'Appraiser Reviewed'),
+        (STATUS_APPRAISER_SUBMITTED, 'Appraiser Submitted'),
+        (STATUS_EMPLOYEE_SUBMITTED, 'Employee Submitted'),
         (STATUS_REVIEWED, 'Reviewed'),
     ]
 

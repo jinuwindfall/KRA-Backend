@@ -24,7 +24,7 @@ class KRASerializer(serializers.ModelSerializer):
 
 
 class KRASerializerHideAppraisee(serializers.ModelSerializer):
-    """Hides appraisee_mark until employee has submitted (used by appraiser before Submitted status)."""
+    """Hides appraisee_mark until the employee has submitted (used in the appraiser's view)."""
     appraisee_mark = serializers.SerializerMethodField()
 
     class Meta:
@@ -32,11 +32,10 @@ class KRASerializerHideAppraisee(serializers.ModelSerializer):
         fields = '__all__'
 
     def get_appraisee_mark(self, obj):
-        # Only expose after employee has submitted
+        # Only expose once the employee has actually submitted their own mark
         from .models import Appraisal
         if obj.appraisal.status in (
-            Appraisal.STATUS_SUBMITTED,
-            Appraisal.STATUS_APPRAISER_REVIEWED,
+            Appraisal.STATUS_EMPLOYEE_SUBMITTED,
             Appraisal.STATUS_REVIEWED,
         ):
             return obj.appraisee_mark

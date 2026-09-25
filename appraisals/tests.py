@@ -36,7 +36,7 @@ class AppraisalPeriodFilterTests(APITestCase):
 			appraisal_type='Quarterly',
 			period_from=date(2026, 1, 1),
 			period_to=date(2026, 3, 31),
-			status=Appraisal.STATUS_SUBMITTED,
+			status=Appraisal.STATUS_APPRAISER_SUBMITTED,
 		)
 		self.appraisal_apr_jun = Appraisal.objects.create(
 			employee=self.staff_employee,
@@ -220,3 +220,73 @@ class AppraisalPeriodFilterTests(APITestCase):
 				('2026-04-01', '2026-06-30'),
 			},
 		)
+
+
+class AppraisalWorkflowOrderTests(APITestCase):
+	"""HR frames -> Appraiser adds content/marks -> Staff marks -> Reviewer finalizes."""
+
+	def setUp(self):
+		self.department = Department.objects.create(name='Engineering')
+
+		self.appraiser_user = User.objects.create_user(username='appraiser1', password='pass1234')
+		self.appraiser_employee = Employee.objects.create(
+			user=self.appraiser_user,
+			emp_id='AP001',
+			designation='HOD',
+			role=Employee.ROLE_APPRAISER,
+			department=self.department,
+		)
+
+		self.staff_user = User.objects.create_user(username='staff2', password='pass1234')
+		self.staff_employee = Employee.objects.create(
+			user=self.staff_user,
+			emp_id='ST002',
+			designation='Engineer',
+			role=Employee.ROLE_STAFF,
+			department=self.department,
+			appraiser=self.appraiser_employee,
+		)
+
+		self.appraisal = Appraisal.objects.create(
+			employee=self.staff_employee,
+			appraisal_type='Annual',
+			period_from=date(2026, 1, 1),
+			period_to=date(2026, 12, 31),
+			status=Appraisal.STATUS_DRAFT,
+			mark_entry_access_open=True,
+		)
+		self.kra = KRA.objects.create(
+			appraisal=self.appraisal,
+			section=KRA.SECTION_KRA,
+			sl_no=1,
+			title='',
+			description='',
+			max_mark=10,
+		)
+
+	def test_appraiser_can_add_content_while_draft(self):
+		"""Regression test: appraiser adding KRA content right after HR frames it (status still Draft)."""
+		self.client.force_authenticate(user=self.appraiser_user)
+		url = reverse('api_kra_detail', args=[self.kra.id])
+		response = self.client.patch(url, {'title': 'Customer Satisfaction', 'description': 'Resolve issues promptly'}, format='json')
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+		self.kra.refresh_from_db()
+		self.assertEqual(self.kra.title, 'Customer Satisfaction')
+
+	def test_staff_cannot_mark_before_appraiser_submits(self):
+		self.client.force_authenticate(user=self.staff_user)
+		url = reverse('api_kra_detail', args=[self.kra.id])
+		response = self.client.patch(url, {'appraisee_mark': '8'}, format='json')
+
+		self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+	def test_staff_can_mark_after_appraiser_submits(self):
+		self.appraisal.status = Appraisal.STATUS_APPRAISER_SUBMITTED
+		self.appraisal.save(update_fields=['status'])
+
+		self.client.force_authenticate(user=self.staff_user)
+		url = reverse('api_kra_detail', args=[self.kra.id])
+		response = self.client.patch(url, {'appraisee_mark': '8'}, format='json')
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
