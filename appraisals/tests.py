@@ -132,6 +132,41 @@ class AppraisalPeriodFilterTests(APITestCase):
 		self.assertEqual(str(jan_kra.max_mark), '25.00')
 		self.assertEqual(str(apr_kra.max_mark), '10.00')
 
+	def test_template_apply_skips_kra_resync_for_appraisals_with_marks(self):
+		jan_kra = KRA.objects.get(appraisal=self.appraisal_jan_mar, section=KRA.SECTION_KRA, sl_no=1)
+		jan_kra.appraisee_mark = 7
+		jan_kra.save(update_fields=['appraisee_mark'])
+
+		url = reverse('api_kra_template')
+		payload = {
+			'frame_config': {'steps': {'kra_objectives': True}},
+			'period_from': '2026-01-01',
+			'period_to': '2026-03-31',
+			'rows': [
+				{
+					'section': KRA.SECTION_KRA,
+					'sl_no': 1,
+					'max_mark': '25.00',
+				}
+			],
+		}
+
+		response = self.client.post(url, payload, format='json')
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['applied_appraisal_count'], 1)
+		self.assertEqual(response.data['skipped_appraisal_count'], 1)
+		self.assertEqual(response.data['skipped_appraisals'][0]['appraisal_id'], self.appraisal_jan_mar.id)
+
+		# frame_config (safe metadata) still applies even when KRA rows are skipped.
+		self.appraisal_jan_mar.refresh_from_db()
+		self.assertEqual(self.appraisal_jan_mar.frame_config, {'steps': {'kra_objectives': True}})
+
+		# But the KRA row itself, and its mark, are untouched.
+		jan_kra.refresh_from_db()
+		self.assertEqual(str(jan_kra.max_mark), '10.00')
+		self.assertEqual(jan_kra.appraisee_mark, 7)
+
 	def test_template_apply_does_not_update_partial_overlap_period(self):
 		url = reverse('api_kra_template')
 		payload = {

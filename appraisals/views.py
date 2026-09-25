@@ -670,7 +670,7 @@ class KRATemplateAPI(generics.GenericAPIView):
         # Apply structure to existing and newly-created appraisals.
         all_staff_appraisals = Appraisal.objects.filter(
             employee__role=Employee.ROLE_STAFF
-        ).prefetch_related('kras')
+        ).select_related('employee').prefetch_related('kras')
 
         if department_ids is not None:
             all_staff_appraisals = all_staff_appraisals.filter(employee__department_id__in=department_ids)
@@ -681,16 +681,50 @@ class KRATemplateAPI(generics.GenericAPIView):
         elif filter_start or filter_end:
             all_staff_appraisals = _apply_period_overlap_filter(all_staff_appraisals, filter_start, filter_end)
 
+        appraisal_type = (frame_config.get('appraisal_options') or {}).get('default_type')
+        special_text = (frame_config.get('appraisal_options') or {}).get('special_appraisal_text')
+        is_special = f'{appraisal_type or ""}'.strip().lower() == 'special'
+
         rows = list(template.rows.all())
         applied_count = all_staff_appraisals.count()
+        skipped_appraisals = []
         for appraisal in all_staff_appraisals:
             appraisal.frame_config = frame_config
-            appraisal.save(update_fields=['frame_config'])
+            update_fields = ['frame_config']
+
+            if appraisal_type:
+                appraisal.appraisal_type = appraisal_type
+                update_fields.append('appraisal_type')
+
+            extras = dict(appraisal.extra_appraiser_data or {})
+            if is_special:
+                extras['special_appraisal_text'] = special_text or ''
+            else:
+                extras.pop('special_appraisal_text', None)
+            appraisal.extra_appraiser_data = extras
+            update_fields.append('extra_appraiser_data')
+
+            appraisal.save(update_fields=update_fields)
 
             current_kras = {
                 (kra.section, kra.sl_no): kra
                 for kra in appraisal.kras.all()
             }
+
+            # Never touch KRA rows once any mark has been entered against this appraisal —
+            # only the frame_config/metadata above (safe, non-destructive) still applies.
+            has_marks = any(
+                kra.appraisee_mark is not None or kra.appraiser_mark is not None or kra.reviewer_mark is not None
+                for kra in current_kras.values()
+            )
+            if has_marks:
+                skipped_appraisals.append({
+                    'appraisal_id': appraisal.id,
+                    'employee_id': appraisal.employee_id,
+                    'emp_id': appraisal.employee.emp_id,
+                })
+                continue
+
             new_keys = {(row.section, row.sl_no) for row in rows}
 
             # Delete KRAs not in new structure
@@ -718,5 +752,7 @@ class KRATemplateAPI(generics.GenericAPIView):
         serializer = self.get_serializer(template)
         payload = serializer.data
         payload['applied_appraisal_count'] = applied_count
+        payload['skipped_appraisal_count'] = len(skipped_appraisals)
+        payload['skipped_appraisals'] = skipped_appraisals
         return Response(payload, status=status.HTTP_200_OK)
 
