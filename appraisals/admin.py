@@ -1,10 +1,12 @@
 from django.contrib import admin
-from .models import Appraisal, KRA
+from .models import Appraisal, KRA, KRATemplate, KRATemplateRow
 
 
 @admin.register(Appraisal)
 class AppraisalAdmin(admin.ModelAdmin):
     list_display = ('employee', 'appraisal_type', 'period_from', 'period_to', 'status')
+    list_filter = ('period_from', 'period_to', 'status', 'appraisal_type')
+    search_fields = ('employee__emp_id', 'employee__user__first_name', 'employee__user__last_name')
     fieldsets = (
         (None, {'fields': ('employee', 'appraisal_type', 'period_from', 'period_to', 'status')}),
         ('Remarks', {'fields': ('employee_remarks', 'appraiser_remarks', 'reviewer_remarks')}),
@@ -21,3 +23,21 @@ class KRAAdmin(admin.ModelAdmin):
     list_filter = ('section',)
     fields = ('appraisal', 'section', 'sl_no', 'title', 'description', 'max_mark')
     readonly_fields = ()
+
+
+class KRATemplateRowInline(admin.TabularInline):
+    model = KRATemplateRow
+    extra = 0
+
+
+@admin.register(KRATemplate)
+class KRATemplateAdmin(admin.ModelAdmin):
+    list_display = ('id', 'period_from', 'period_to', 'updated_at')
+    list_filter = ('period_from', 'period_to')
+    inlines = [KRATemplateRowInline]
+
+
+@admin.register(KRATemplateRow)
+class KRATemplateRowAdmin(admin.ModelAdmin):
+    list_display = ('template', 'section', 'sl_no', 'max_mark')
+    list_filter = ('section', 'template__period_from', 'template__period_to')

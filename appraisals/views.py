@@ -188,7 +188,13 @@ def ensure_current_year_appraisals(employee_qs):
         cache.set(cache_key, True, _ENSURE_APPRAISALS_CACHE_TTL)
         return
 
-    template = KRATemplate.objects.prefetch_related('rows').order_by('-id').first()
+    # Only seed from a template whose period actually matches the one being
+    # auto-provisioned here — grabbing "whatever was saved most recently" regardless
+    # of its period would bleed an unrelated period's structure (e.g. a specific
+    # month HR just framed) into this full-year default.
+    template = KRATemplate.objects.filter(
+        period_from=period_from, period_to=period_to
+    ).prefetch_related('rows').order_by('-id').first()
     if not template:
         cache.set(cache_key, True, _ENSURE_APPRAISALS_CACHE_TTL)
         return
