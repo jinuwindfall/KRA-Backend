@@ -1,8 +1,10 @@
+import hashlib
 from datetime import date
 
 from rest_framework import generics, permissions, status
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
+from django.core.cache import cache
 from django.db.models import Count
 from django.db.models.functions import Coalesce
 from django.utils.dateparse import parse_date
@@ -117,22 +119,43 @@ def clone_common_structure(appraisal):
     ])
 
 
+_ENSURE_APPRAISALS_CACHE_TTL = 300  # seconds
+
+
+def _ensure_appraisals_cache_key(employee_ids, year):
+    ids_digest = hashlib.md5(','.join(map(str, sorted(employee_ids))).encode()).hexdigest()
+    return f'ensure_current_year_appraisals:{year}:{ids_digest}'
+
+
 def ensure_current_year_appraisals(employee_qs):
+    """Auto-provision missing appraisals/KRAs for the current year.
+
+    This runs inline on hot read paths (dashboard list, my-appraisal), so once a given
+    set of employees has been checked it's cached briefly to avoid re-scanning the
+    whole scope on every page load / filter change. The cache key is derived from the
+    exact employee id set, so a newly added employee produces a fresh key and is picked
+    up immediately rather than waiting out the TTL.
+    """
     employee_ids = list(employee_qs.values_list('id', flat=True))
     if not employee_ids:
         return
 
     today = date.today()
+    cache_key = _ensure_appraisals_cache_key(employee_ids, today.year)
+    if cache.get(cache_key):
+        return
+
     period_from = date(today.year, 1, 1)
     period_to = date(today.year, 12, 31)
 
-    existing_emp_ids = set(
-        Appraisal.objects.filter(employee_id__in=employee_ids).values_list('employee_id', flat=True)
-    )
-    missing_emp_ids = [emp_id for emp_id in employee_ids if emp_id not in existing_emp_ids]
+    existing_appraisals = {
+        app.employee_id: app
+        for app in Appraisal.objects.filter(employee_id__in=employee_ids).only('id', 'employee_id', 'frame_config')
+    }
+    missing_emp_ids = [emp_id for emp_id in employee_ids if emp_id not in existing_appraisals]
 
     if missing_emp_ids:
-        Appraisal.objects.bulk_create([
+        created = Appraisal.objects.bulk_create([
             Appraisal(
                 employee_id=emp_id,
                 appraisal_type='Annual',
@@ -142,10 +165,18 @@ def ensure_current_year_appraisals(employee_qs):
             )
             for emp_id in missing_emp_ids
         ])
+        if any(app.pk is None for app in created):
+            # Some DB backends don't report pks from bulk_create; refetch just the new rows.
+            created = list(
+                Appraisal.objects.filter(employee_id__in=missing_emp_ids).only('id', 'employee_id', 'frame_config')
+            )
+        for app in created:
+            existing_appraisals[app.employee_id] = app
 
-    appraisals = list(Appraisal.objects.filter(employee_id__in=employee_ids))
+    appraisals = list(existing_appraisals.values())
     appraisal_ids = [app.id for app in appraisals]
     if not appraisal_ids:
+        cache.set(cache_key, True, _ENSURE_APPRAISALS_CACHE_TTL)
         return
 
     appraisal_ids_with_kras = set(
@@ -154,14 +185,17 @@ def ensure_current_year_appraisals(employee_qs):
     empty_appraisals = [app for app in appraisals if app.id not in appraisal_ids_with_kras]
 
     if not empty_appraisals:
+        cache.set(cache_key, True, _ENSURE_APPRAISALS_CACHE_TTL)
         return
 
     template = KRATemplate.objects.prefetch_related('rows').order_by('-id').first()
     if not template:
+        cache.set(cache_key, True, _ENSURE_APPRAISALS_CACHE_TTL)
         return
 
     rows = list(template.rows.all())
     if not rows:
+        cache.set(cache_key, True, _ENSURE_APPRAISALS_CACHE_TTL)
         return
 
     appraisals_to_update = [app for app in empty_appraisals if app.frame_config != template.frame_config]
@@ -182,6 +216,8 @@ def ensure_current_year_appraisals(employee_qs):
         for app in empty_appraisals
         for row in rows
     ])
+
+    cache.set(cache_key, True, _ENSURE_APPRAISALS_CACHE_TTL)
 
 
 class IsAuthenticatedEmployee(permissions.BasePermission):
@@ -351,7 +387,19 @@ class AppraisalDetailAPI(generics.RetrieveUpdateAPIView):
             if new_status and new_status != Appraisal.STATUS_REVIEWED:
                 raise PermissionDenied('Reviewers can only advance status to Reviewed.')
 
-        return super().partial_update(request, *args, **kwargs)
+        response = super().partial_update(request, *args, **kwargs)
+
+        # Mark-entry access is exclusive per employee: opening one period for scoring
+        # automatically closes every other period for that same employee, so at most
+        # one of their appraisals is ever unlocked at a time (HR can still view marks
+        # on closed periods regardless — this only affects write access).
+        if employee.role == Employee.ROLE_HR and data.get('mark_entry_access_open'):
+            appraisal.refresh_from_db(fields=['employee_id'])
+            Appraisal.objects.filter(employee_id=appraisal.employee_id).exclude(pk=appraisal.pk).update(
+                mark_entry_access_open=False
+            )
+
+        return response
 
 
 # ── KRA endpoints ──
@@ -552,16 +600,14 @@ class AvailableAppraisalPeriodsAPI(generics.GenericAPIView):
 class KRATemplateAPI(generics.GenericAPIView):
     """
     GET  /kra-template/  → returns the current HR-designed template (or empty)
-    POST /kra-template/  → HR saves a new template and applies it to all existing staff appraisals
+    POST /kra-template/  → HR saves a new template and applies it to every matching appraisal,
+                           creating appraisals for the targeted period where one doesn't exist yet
     """
     serializer_class = KRATemplateSerializer
     permission_classes = [IsAuthenticatedEmployee]
 
     def get(self, request, *args, **kwargs):
-        # allow_swap: the two date inputs update independently in the UI, so a change can
-        # transiently send an inverted range before the second field catches up - swap
-        # instead of erroring on what's just a momentary, self-correcting state.
-        filter_start, filter_end = _parse_period_filters(request.query_params, allow_swap=True)
+        filter_start, filter_end = _parse_period_filters(request.query_params)
 
         templates = KRATemplate.objects.prefetch_related('rows').order_by('-updated_at', '-id')
         if filter_start and filter_end:
@@ -601,6 +647,15 @@ class KRATemplateAPI(generics.GenericAPIView):
             'employee_ids',
         )
 
+        target_staff = Employee.objects.filter(role=Employee.ROLE_STAFF)
+        if department_ids is not None:
+            target_staff = target_staff.filter(department_id__in=department_ids)
+        if staff_ids is not None:
+            target_staff = target_staff.filter(id__in=staff_ids)
+
+        if request.data.get('dry_run'):
+            return self._check_conflicts(target_staff, filter_start, filter_end, rows_data)
+
         # Upsert period-scoped template when a period is provided.
         template_qs = KRATemplate.objects.order_by('-id')
         if filter_start and filter_end:
@@ -631,13 +686,6 @@ class KRATemplateAPI(generics.GenericAPIView):
             )
             for row in rows_data
         ])
-
-        # Determine target staff first (for optional department/staff scoped rollout).
-        target_staff = Employee.objects.filter(role=Employee.ROLE_STAFF)
-        if department_ids is not None:
-            target_staff = target_staff.filter(department_id__in=department_ids)
-        if staff_ids is not None:
-            target_staff = target_staff.filter(id__in=staff_ids)
 
         # For period-scoped templates, ensure appraisals exist for that exact period.
         if filter_start and filter_end:
@@ -673,7 +721,7 @@ class KRATemplateAPI(generics.GenericAPIView):
         # Apply structure to existing and newly-created appraisals.
         all_staff_appraisals = Appraisal.objects.filter(
             employee__role=Employee.ROLE_STAFF
-        ).select_related('employee').prefetch_related('kras')
+        ).prefetch_related('kras')
 
         if department_ids is not None:
             all_staff_appraisals = all_staff_appraisals.filter(employee__department_id__in=department_ids)
@@ -684,50 +732,16 @@ class KRATemplateAPI(generics.GenericAPIView):
         elif filter_start or filter_end:
             all_staff_appraisals = _apply_period_overlap_filter(all_staff_appraisals, filter_start, filter_end)
 
-        appraisal_type = (frame_config.get('appraisal_options') or {}).get('default_type')
-        special_text = (frame_config.get('appraisal_options') or {}).get('special_appraisal_text')
-        is_special = f'{appraisal_type or ""}'.strip().lower() == 'special'
-
         rows = list(template.rows.all())
         applied_count = all_staff_appraisals.count()
-        skipped_appraisals = []
         for appraisal in all_staff_appraisals:
             appraisal.frame_config = frame_config
-            update_fields = ['frame_config']
-
-            if appraisal_type:
-                appraisal.appraisal_type = appraisal_type
-                update_fields.append('appraisal_type')
-
-            extras = dict(appraisal.extra_appraiser_data or {})
-            if is_special:
-                extras['special_appraisal_text'] = special_text or ''
-            else:
-                extras.pop('special_appraisal_text', None)
-            appraisal.extra_appraiser_data = extras
-            update_fields.append('extra_appraiser_data')
-
-            appraisal.save(update_fields=update_fields)
+            appraisal.save(update_fields=['frame_config'])
 
             current_kras = {
                 (kra.section, kra.sl_no): kra
                 for kra in appraisal.kras.all()
             }
-
-            # Never touch KRA rows once any mark has been entered against this appraisal —
-            # only the frame_config/metadata above (safe, non-destructive) still applies.
-            has_marks = any(
-                kra.appraisee_mark is not None or kra.appraiser_mark is not None or kra.reviewer_mark is not None
-                for kra in current_kras.values()
-            )
-            if has_marks:
-                skipped_appraisals.append({
-                    'appraisal_id': appraisal.id,
-                    'employee_id': appraisal.employee_id,
-                    'emp_id': appraisal.employee.emp_id,
-                })
-                continue
-
             new_keys = {(row.section, row.sl_no) for row in rows}
 
             # Delete KRAs not in new structure
@@ -755,7 +769,49 @@ class KRATemplateAPI(generics.GenericAPIView):
         serializer = self.get_serializer(template)
         payload = serializer.data
         payload['applied_appraisal_count'] = applied_count
-        payload['skipped_appraisal_count'] = len(skipped_appraisals)
-        payload['skipped_appraisals'] = skipped_appraisals
         return Response(payload, status=status.HTTP_200_OK)
+
+    def _check_conflicts(self, target_staff, filter_start, filter_end, rows_data):
+        """Preview what saving this structure would delete, without writing anything.
+
+        A row is only reported if it's being dropped from the new structure AND an
+        appraisee/appraiser/reviewer has already entered something against it.
+        """
+        new_keys = {(row.get('section'), row.get('sl_no')) for row in rows_data}
+
+        appraisals = Appraisal.objects.filter(employee__in=target_staff).select_related(
+            'employee', 'employee__user'
+        ).prefetch_related('kras')
+
+        if filter_start and filter_end:
+            appraisals = appraisals.filter(period_from=filter_start, period_to=filter_end)
+        elif filter_start or filter_end:
+            appraisals = _apply_period_overlap_filter(appraisals, filter_start, filter_end)
+
+        conflicts = []
+        affected_appraisal_ids = set()
+        for appraisal in appraisals:
+            for kra in appraisal.kras.all():
+                if (kra.section, kra.sl_no) in new_keys:
+                    continue
+                has_marks = kra.appraisee_mark is not None or kra.appraiser_mark is not None or kra.reviewer_mark is not None
+                if not ((kra.title or '').strip() or (kra.description or '').strip() or has_marks):
+                    continue
+                affected_appraisal_ids.add(appraisal.id)
+                conflicts.append({
+                    'appraisal_id': appraisal.id,
+                    'employee_id': appraisal.employee_id,
+                    'employee_name': appraisal.employee.user.get_full_name() or appraisal.employee.user.username,
+                    'emp_id': appraisal.employee.emp_id,
+                    'section': kra.section,
+                    'sl_no': kra.sl_no,
+                    'title': kra.title,
+                    'has_marks': has_marks,
+                })
+
+        return Response({
+            'has_conflicts': bool(conflicts),
+            'affected_appraisal_count': len(affected_appraisal_ids),
+            'conflicts': conflicts,
+        }, status=status.HTTP_200_OK)
 

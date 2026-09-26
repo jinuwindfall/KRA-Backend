@@ -34,7 +34,7 @@ class Employee(models.Model):
         related_name='employees',
     )
     designation = models.CharField(max_length=100)
-    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_STAFF)
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_STAFF, db_index=True)
 
     appraiser = models.ForeignKey(
         'self',
@@ -89,6 +89,8 @@ class EmployeeMemo(models.Model):
     )
     memo = models.TextField()
     deduction = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    period_from = models.DateField()
+    period_to = models.DateField()
     created_by = models.ForeignKey(
         Employee,
         null=True,

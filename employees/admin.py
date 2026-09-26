@@ -24,8 +24,8 @@ class EmployeeAdmin(admin.ModelAdmin):
 
 @admin.register(EmployeeMemo)
 class EmployeeMemoAdmin(admin.ModelAdmin):
-    list_display = ('id', 'employee', 'created_by', 'created_at')
-    list_filter = ('created_at',)
+    list_display = ('id', 'employee', 'period_from', 'period_to', 'deduction', 'created_by', 'created_at')
+    list_filter = ('created_at', 'period_from', 'period_to')
     search_fields = ('employee__emp_id', 'employee__user__first_name', 'employee__user__last_name', 'memo')
 
 

@@ -15,7 +15,14 @@ class AppraisalDisplayMixin:
         data['employee_department'] = emp.department.name if emp.department else 'Unassigned Department'
         data['appraiser_name'] = emp.appraiser.user.get_full_name() if emp.appraiser else ''
         data['reviewer_name'] = emp.reviewer.user.get_full_name() if emp.reviewer else ''
-        data['memo_total_deduction'] = sum((memo.deduction for memo in emp.memos.all()), Decimal('0'))
+        # Only count memos raised for this exact appraisal period, not the employee's memo history overall.
+        data['memo_total_deduction'] = sum(
+            (
+                memo.deduction for memo in emp.memos.all()
+                if memo.period_from == obj.period_from and memo.period_to == obj.period_to
+            ),
+            Decimal('0'),
+        )
         return data
 
 

@@ -212,6 +212,8 @@ class EmployeeMemoSerializer(serializers.ModelSerializer):
             'employee_name',
             'memo',
             'deduction',
+            'period_from',
+            'period_to',
             'created_by',
             'created_by_name',
             'created_at',

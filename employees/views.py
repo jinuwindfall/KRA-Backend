@@ -26,6 +26,29 @@ from .serializers import (
 )
 
 
+def _parse_period_date(value, field_name):
+    if value in (None, ''):
+        return None
+    parsed = parse_date(str(value).strip())
+    if not parsed:
+        raise ValidationError({field_name: 'Invalid date format. Use YYYY-MM-DD.'})
+    return parsed
+
+
+def _parse_memo_period(data, required):
+    period_from = _parse_period_date(data.get('period_from'), 'period_from')
+    period_to = _parse_period_date(data.get('period_to'), 'period_to')
+
+    if required and (period_from is None or period_to is None):
+        raise ValidationError({'period': 'A memo must be tagged with the appraisal period (period_from and period_to) it applies to.'})
+    if bool(period_from) ^ bool(period_to):
+        raise ValidationError({'period': 'Both period_from and period_to are required together.'})
+    if period_from and period_to and period_from > period_to:
+        raise ValidationError({'period_from': 'period_from cannot be greater than period_to.'})
+
+    return period_from, period_to
+
+
 def _employee_payload(emp):
     user = emp.user
     payload = {
@@ -694,9 +717,16 @@ class EmployeeMemoListCreateView(APIView):
         if error_response:
             return error_response
 
+        try:
+            period_from, period_to = _parse_memo_period(request.query_params, required=False)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
         memos = EmployeeMemo.objects.filter(employee=employee).select_related(
             'employee__user', 'created_by__user'
         )
+        if period_from and period_to:
+            memos = memos.filter(period_from=period_from, period_to=period_to)
         serializer = EmployeeMemoSerializer(memos, many=True)
         return Response(serializer.data)
 
@@ -717,6 +747,7 @@ class EmployeeMemoListCreateView(APIView):
 
         try:
             deduction = self._parse_deduction(request.data.get('deduction'))
+            period_from, period_to = _parse_memo_period(request.data, required=True)
         except ValidationError as exc:
             return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
 
@@ -724,6 +755,8 @@ class EmployeeMemoListCreateView(APIView):
             employee=employee,
             memo=memo_text,
             deduction=deduction,
+            period_from=period_from,
+            period_to=period_to,
             created_by=request.user.employee,
         )
         memo = EmployeeMemo.objects.select_related('employee__user', 'created_by__user').get(pk=memo.pk)
@@ -770,7 +803,15 @@ class EmployeeMemoDetailView(APIView):
             except ValidationError as exc:
                 return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
 
-        memo.save(update_fields=['memo', 'deduction', 'updated_at'])
+        if 'period_from' in request.data or 'period_to' in request.data:
+            try:
+                period_from, period_to = _parse_memo_period(request.data, required=True)
+            except ValidationError as exc:
+                return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+            memo.period_from = period_from
+            memo.period_to = period_to
+
+        memo.save(update_fields=['memo', 'deduction', 'period_from', 'period_to', 'updated_at'])
         serializer = EmployeeMemoSerializer(memo)
         return Response(serializer.data)
 
@@ -796,15 +837,21 @@ class EmployeeMemoGroupedListView(APIView):
         if caller.role != Employee.ROLE_HR:
             return Response({'error': 'Only HR can access staff memos.'}, status=status.HTTP_403_FORBIDDEN)
 
+        try:
+            period_from, period_to = _parse_memo_period(request.query_params, required=False)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        memo_qs = EmployeeMemo.objects.select_related('employee__user', 'created_by__user')
+        if period_from and period_to:
+            memo_qs = memo_qs.filter(period_from=period_from, period_to=period_to)
+
         employees = Employee.objects.filter(role=Employee.ROLE_STAFF).select_related(
             'user', 'department', 'appraiser__user', 'reviewer__user'
         ).prefetch_related(
             'reviewer_departments',
             'appraiser_departments',
-            Prefetch(
-                'memos',
-                queryset=EmployeeMemo.objects.select_related('employee__user', 'created_by__user'),
-            ),
+            Prefetch('memos', queryset=memo_qs),
         ).order_by('department__name', 'user__first_name', 'user__last_name')
 
         serializer = EmployeeWithMemosSerializer(employees, many=True)
