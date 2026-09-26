@@ -558,7 +558,10 @@ class KRATemplateAPI(generics.GenericAPIView):
     permission_classes = [IsAuthenticatedEmployee]
 
     def get(self, request, *args, **kwargs):
-        filter_start, filter_end = _parse_period_filters(request.query_params)
+        # allow_swap: the two date inputs update independently in the UI, so a change can
+        # transiently send an inverted range before the second field catches up - swap
+        # instead of erroring on what's just a momentary, self-correcting state.
+        filter_start, filter_end = _parse_period_filters(request.query_params, allow_swap=True)
 
         templates = KRATemplate.objects.prefetch_related('rows').order_by('-updated_at', '-id')
         if filter_start and filter_end:
