@@ -98,6 +98,13 @@ DATABASES = {
     )
 }
 
+# Aiven (and most managed MySQL providers) require TLS. Point MYSQL_SSL_CA at the
+# downloaded CA certificate to enable it.
+if DATABASES['default'].get('ENGINE') == 'django.db.backends.mysql':
+    ssl_ca = os.environ.get('MYSQL_SSL_CA')
+    if ssl_ca:
+        DATABASES['default'].setdefault('OPTIONS', {})['ssl'] = {'ca': ssl_ca}
+
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
@@ -142,5 +149,9 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-CORS_ALLOW_ALL_ORIGINS = DEBUG
+CORS_ALLOWED_ORIGINS = (
+    [origin.strip() for origin in os.environ.get('CORS_ALLOWED_ORIGINS', '').split(',') if origin.strip()]
+)
+# Only wildcard CORS in local development, and only when no explicit allow-list is configured.
+CORS_ALLOW_ALL_ORIGINS = DEBUG and not CORS_ALLOWED_ORIGINS
 CSRF_TRUSTED_ORIGINS = os.environ.get('CSRF_TRUSTED_ORIGINS', '').split(',') if os.environ.get('CSRF_TRUSTED_ORIGINS') else []
