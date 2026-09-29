@@ -10,6 +10,7 @@ class DepartmentAdmin(admin.ModelAdmin):
 @admin.register(Employee)
 class EmployeeAdmin(admin.ModelAdmin):
     list_display = ('emp_id', 'user', 'role', 'department', 'designation', 'appraiser', 'reviewer', 'is_active')
+    list_select_related = ('user', 'department', 'appraiser', 'appraiser__user', 'reviewer', 'reviewer__user')
     list_filter = ('role', 'department')
     search_fields = ('emp_id', 'user__username', 'user__first_name', 'user__last_name')
     fieldsets = (
@@ -48,6 +49,7 @@ class ReviewerDuty(Employee):
 @admin.register(AppraiserDuty)
 class AppraiserDutyAdmin(admin.ModelAdmin):
     list_display = ('emp_id', 'user', 'department', 'get_assigned_departments')
+    list_select_related = ('user', 'department')
     list_filter = ('department',)
     search_fields = ('emp_id', 'user__username', 'user__first_name', 'user__last_name')
     filter_horizontal = ('appraiser_departments',)
@@ -71,6 +73,7 @@ class AppraiserDutyAdmin(admin.ModelAdmin):
 @admin.register(ReviewerDuty)
 class ReviewerDutyAdmin(admin.ModelAdmin):
     list_display = ('emp_id', 'user', 'department', 'get_assigned_departments')
+    list_select_related = ('user', 'department')
     list_filter = ('department',)
     search_fields = ('emp_id', 'user__username', 'user__first_name', 'user__last_name')
     filter_horizontal = ('reviewer_departments',)
